@@ -1,37 +1,32 @@
-version: 0.2
+install:
+  runtime-versions:
+    nodejs: 22
+  commands:
+    - echo "Installing dependencies..."
+    - npm ci --prefix PLOCLO_cms
+    - pip3 install semgrep
 
-phases:
-  install:
-    runtime-versions:
-      nodejs: 22
-    commands:
-     - echo "Installing dependencies..."
-     - cd PLOCLO_cms && npm ci
-     - pip3 install semgrep
-     - export PATH=$HOME/.local/bin:$PATH
-     - semgrep --version
-
-  pre_build:
-    commands:
+pre_build:
+  commands:
     - export PATH=$HOME/.local/bin:$PATH
     - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
     - echo "Security Review & Preparation"
     - semgrep scan --config p/default --error --quiet .
     - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
 
-  build:
-    commands:
-      - echo "Building Docker Image..."
-      - docker-compose -f PLOCLO_cms/docker-compose.yml build
+build:
+  commands:
+    - echo "Building Docker Image..."
+    - docker-compose -f PLOCLO_cms/docker-compose.yml build
 
-  post_build:
-    commands:
-      - echo "Pushing to ECR..."
-      - docker-compose -f PLOCLO_cms/docker-compose.yml push
-      - echo "Build completed on $(date)"
-      - printf '[{"name":"backend","imageUri":"%s"},{"name":"frontend","imageUri":"%s"}]' \
-        "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:backend-latest" \
-        "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:frontend-latest" > imagedefinitions.json
+post_build:
+  commands:
+    - echo "Pushing to ECR..."
+    - docker-compose -f PLOCLO_cms/docker-compose.yml push
+    - echo "Build completed on $(date)"
+    - printf '[{"name":"backend","imageUri":"%s"},{"name":"frontend","imageUri":"%s"}]' \
+      "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:backend-latest" \
+      "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:frontend-latest" > imagedefinitions.json
 
 artifacts:
   files:
