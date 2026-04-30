@@ -42,7 +42,7 @@ services:
       - ./backend:/app
       - /app/node_modules
     ports:
-      - "9771:3001"
+      - "8000:3001"
     command: sh -c "npx prisma db push && npm run dev"
 
   frontend:
@@ -50,16 +50,16 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: frontend
-    volumes:
-      - ./frontend:/app
-      - /app/.next
+    # volumes:
+    #   - ./frontend:/app
+    #   - /app/.next
     ports:
-      - "9770:3000"
+      - "3000:3000"
     environment:
       - NODE_ENV=development
     command: npm run dev
     env_file:
-      - ./.env
+      - ./PLOCLO_cms/.env
 
 volumes:
   pgdata:
