@@ -5,14 +5,17 @@ phases:
     runtime-versions:
       nodejs: 22
     commands:
-      - echo "Installing dependencies..."
-      - cd PLOCLO_cms && npm ci
-      - python3 -m pip install semgrep
+     - echo "Installing dependencies..."
+     - cd PLOCLO_cms && npm ci
+     - pip3 install semgrep
+     - export PATH=$HOME/.local/bin:$PATH
+     - semgrep --version
 
   pre_build:
     commands:
+      - export PATH=$HOME/.local/bin:$PATH
       - echo "Security Review & Preparation"
-      - python3 -m semgrep scan --config auto .
+      - semgrep scan --config p/default --error --quiet .
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
 
   build:
