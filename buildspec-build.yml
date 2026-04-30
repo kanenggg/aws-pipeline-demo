@@ -12,7 +12,7 @@ phases:
   pre_build:
     commands:
       - echo "Security Review & Preparation"
-      - /home/codebuild/.local/bin/semgrep scan --config auto .
+      - python3 -m semgrep scan --config auto .
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
 
   build:
