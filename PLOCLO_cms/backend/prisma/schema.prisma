@@ -1,0 +1,317 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --- Users ---
+model Users {
+  id            Int      @id @default(autoincrement())
+  username      String   @unique @db.VarChar(50)
+  email         String   @unique @db.VarChar(100)
+  password_hash String?
+  role          String?  @default("guest")
+  created_at    DateTime @default(now()) @db.Timestamp(0)
+
+  @@map("users")
+}
+
+// --- Hierarchy ---
+model University {
+  id              Int       @id @default(autoincrement())
+  name            String?   @db.VarChar(100)
+  name_th         String?   @db.VarChar(100)
+  abbreviation    String?   @db.VarChar(50)
+  abbreviation_th String?   @db.VarChar(50)
+  faculties       Faculty[]
+
+  @@map("university")
+}
+
+model Faculty {
+  id              Int        @id @default(autoincrement())
+  university_id   Int
+  name            String     @db.VarChar(100)
+  name_th         String     @db.VarChar(100)
+  abbreviation    String?    @db.VarChar(50)
+  abbreviation_th String?    @db.VarChar(50)
+  university      University @relation(fields: [university_id], references: [id], onDelete: Cascade)
+
+  programs    Program[]
+  instructors Instructor[]
+
+  @@map("faculty")
+}
+
+model Program {
+  id                   Int       @id @default(autoincrement())
+  faculty_id           Int
+  program_code         String    @db.VarChar(50)
+  program_name_en      String    @db.VarChar(255)
+  program_name_th      String?   @db.VarChar(255)
+  program_shortname_en String?   @db.VarChar(100)
+  program_shortname_th String?   @db.VarChar(100)
+  program_year         Int
+
+  faculty Faculty @relation(fields: [faculty_id], references: [id], onDelete: Cascade)
+
+  courses  Course[]
+  plos     Plo[]
+  students Student[]
+  programOnCourses ProgramOnCourse[]
+
+  @@unique([program_code, program_year])
+  @@map("program")
+}
+
+// --- Course Structure ---
+
+model Course {
+  id         Int    @id @default(autoincrement())
+  code       String @db.VarChar(50)
+  name       String @db.VarChar(255)
+  name_th    String @db.VarChar(255)
+  credits    Decimal @db.Decimal(10, 3)
+  program_id Int
+
+  program Program @relation(fields: [program_id], references: [id], onDelete: Cascade)
+
+  // Relations
+  clos        Clo[]
+  sections    CourseSection[]
+  instructors CourseInstructor[]
+  programs    ProgramOnCourse[]
+  gradeSettings GradeSetting[]
+
+  @@map("course")
+}
+
+model CourseSection {
+  id        Int @id @default(autoincrement())
+  course_id Int
+  section   Int @default(1)
+  semester  Int @default(1)
+  year      Int
+
+  course Course @relation(fields: [course_id], references: [id], onDelete: Cascade)
+
+  // ✅ MOVED: Relations now link to Section
+  assignments      Assignment[]
+  categoryWeights  AssignmentCategoryWeight[]
+  
+  students         StudentOnSection[]
+  scores           StudentScore[]
+
+  @@map("course_section")
+}
+
+model Instructor {
+  id             Int       @id @default(autoincrement())
+  full_thai_name String    @db.VarChar(100)
+  full_eng_name  String    @db.VarChar(100)
+  email          String    @db.VarChar(100)
+  phoneNum       String?   @db.VarChar(20)
+  faculty_id     Int
+  created_at     DateTime? @default(now()) @db.Timestamp(6)
+
+  faculty Faculty @relation(fields: [faculty_id], references: [id], onDelete: Cascade)
+
+  teaching_courses CourseInstructor[]
+  @@map("instructor")
+}
+
+model CourseInstructor {
+  courseId     Int @map("course_id")
+  instructorId Int @map("instructor_id")
+
+  course     Course     @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  instructor Instructor @relation(fields: [instructorId], references: [id], onDelete: Cascade)
+
+  @@id([courseId, instructorId])
+  @@map("course_instructor")
+}
+
+// --- Outcomes ---
+model Plo {
+  id         Int    @id @default(autoincrement())
+  code       String @db.VarChar(50)
+  program_id Int
+  name       String
+  engname    String
+
+  program Program @relation(fields: [program_id], references: [id], onDelete: Cascade)
+
+  clo_plo_mappings CloPloMapping[]
+
+  @@map("plo")
+}
+
+model Clo {
+  id        Int    @id @default(autoincrement())
+  code      String @db.VarChar(20)
+  name      String @db.VarChar(255)
+  name_th   String @db.VarChar(255)
+  course_id Int
+
+  course Course @relation(fields: [course_id], references: [id], onDelete: Cascade)
+
+  clo_plo_mappings        CloPloMapping[]
+  assignment_clo_mappings AssignmentCloMapping[]
+
+  @@map("clo")
+}
+
+model CloPloMapping {
+  id        Int      @id @default(autoincrement())
+  cloId     Int      @map("clo_id")
+  ploId     Int      @map("plo_id")
+  weight    Decimal? @default(0) @db.Decimal(7, 4)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  clo Clo @relation(fields: [cloId], references: [id], onDelete: Cascade)
+  plo Plo @relation(fields: [ploId], references: [id], onDelete: Cascade)
+
+  @@unique([cloId, ploId], map: "unique_clo_plo")
+  @@map("clo_plo_mapping")
+}
+
+// --- Assignments ---
+model Assignment {
+  id Int @id @default(autoincrement())
+
+  // ✅ CHANGED: Link to Section instead of Course
+  section_id Int           @map("section_id")
+  section    CourseSection @relation(fields: [section_id], references: [id], onDelete: Cascade)
+
+  name        String
+  category    AssCategory @default(assignment)
+  description String?
+  maxScore    Decimal     @default(100) @map("max_score") @db.Decimal(7, 4)
+  weight      Decimal     @default(0) @db.Decimal(7, 4)
+  createdAt   DateTime    @default(now()) @map("created_at")
+
+  assignment_clo_mappings AssignmentCloMapping[]
+  scores                  StudentScore[]
+
+  @@map("assignment")
+}
+
+model AssignmentCloMapping {
+  assId     Int      @map("assignment_id")
+  cloId     Int      @map("clo_id")
+  weight    Decimal? @default(0) @db.Decimal(7, 4)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  assignment Assignment @relation(fields: [assId], references: [id], onDelete: Cascade)
+  clo        Clo        @relation(fields: [cloId], references: [id], onDelete: Cascade)
+
+  @@unique([assId, cloId])
+  @@map("assignment_clo_mapping")
+}
+
+model AssignmentCategoryWeight {
+  id         Int         @id @default(autoincrement())
+  
+  // ✅ CHANGED: Link to Section
+  section_id Int         @map("section_id")
+  category   AssCategory
+  maxWeight  Decimal     @default(0) @db.Decimal(7, 4) @map("max_weight")
+  createdAt  DateTime    @default(now()) @map("created_at")
+  updatedAt  DateTime    @default(now()) @updatedAt @map("updated_at")
+
+  section CourseSection @relation(fields: [section_id], references: [id], onDelete: Cascade)
+
+  @@unique([section_id, category])
+  @@map("assignment_category_weight")
+}
+
+// --- Scores ---
+model StudentScore {
+  id            Int      @id @default(autoincrement())
+  student_id    Int
+  section_id    Int
+  assignment_id Int
+  score         Decimal  @default(0) @db.Decimal(7, 4)
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+
+  student    Student       @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  assignment Assignment    @relation(fields: [assignment_id], references: [id], onDelete: Cascade)
+  section    CourseSection @relation(fields: [section_id], references: [id], onDelete: Cascade)
+
+  @@unique([student_id, assignment_id])
+  @@map("student_score")
+}
+
+// --- Grades ---
+model GradeSetting {
+  id         Int      @id @default(autoincrement())
+  grade      String
+  score      Decimal  @db.Decimal(7, 4)
+  
+  course_id Int      @map("course_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @default(now()) @updatedAt @map("updated_at")
+
+  course Course @relation(fields: [course_id], references: [id], onDelete: Cascade)
+
+  @@map("grade_setting")
+}
+
+// --- Students ---
+model Student {
+  id           Int       @id @default(autoincrement())
+  student_code String    @unique @db.VarChar(20)
+  first_name   String    @db.VarChar(100)
+  last_name    String    @db.VarChar(100)
+  program_id   Int
+  email        String?   @db.VarChar(255)
+  created_at   DateTime? @default(now()) @db.Timestamp(6)
+
+  program Program? @relation(fields: [program_id], references: [id], onUpdate: NoAction, onDelete: Cascade)
+
+  sections StudentOnSection[]
+  scores   StudentScore[]
+
+  @@map("student")
+}
+
+model StudentOnSection {
+  student_id Int
+  section_id Int      @map("section_id")
+  assignedAt DateTime @default(now())
+
+  student Student       @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  section CourseSection @relation(fields: [section_id], references: [id], onDelete: Cascade)
+
+  @@unique([student_id, section_id])
+  @@map("student_on_section")
+}
+
+model ProgramOnCourse {
+  program_id Int  @map("program_id")
+  course_id  Int  @map("course_id")
+  type       String @db.VarChar(50) // เช่น "core", "elective", "general"
+
+  program Program @relation(fields: [program_id], references: [id], onDelete: Cascade)
+  course  Course  @relation(fields: [course_id], references: [id], onDelete: Cascade)
+
+  assignedAt DateTime @default(now())
+
+  @@id([program_id, course_id]) // ใช้ composite primary key
+  @@map("program_on_course")
+}
+
+enum AssCategory {
+  quiz
+  assignment
+  project
+  presentation
+  midtermExam
+  finalExam
+}
