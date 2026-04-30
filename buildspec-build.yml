@@ -12,7 +12,7 @@ phases:
   pre_build:
     commands:
       - echo "Security Review & Preparation"
-      - if [ -d "PLOCLO_cms" ]; then cd PLOCLO_cms && python3 -m semgrep scan --config auto --error; else python3 -m semgrep scan --config auto --error; fi
+      - python3 -m semgrep scan --config auto --error --quiet .
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
 
   build:
