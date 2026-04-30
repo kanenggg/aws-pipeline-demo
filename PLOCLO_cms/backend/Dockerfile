@@ -17,8 +17,12 @@ RUN npx prisma generate
 
 COPY . .
 
+RUN chmod +x wait-for-db.sh
 RUN npm run build
 
-EXPOSE 9771
+EXPOSE 3001
+
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+USER appuser
 
 CMD ["sh", "-c", "./wait-for-db.sh postgres && node dist/index.js"]

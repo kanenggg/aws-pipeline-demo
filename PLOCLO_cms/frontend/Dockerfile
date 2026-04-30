@@ -7,6 +7,9 @@ RUN npm install
 
 COPY . .
 
-EXPOSE 9770
+EXPOSE 3000
+
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+USER appuser
 
 CMD ["npm", "run", "dev"]
