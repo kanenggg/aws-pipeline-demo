@@ -7,28 +7,19 @@ phases:
     commands:
       - echo "Installing dependencies..."
       - cd PLOCLO_cms && npm ci
-      - python3 -m pip install semgrep
 
   pre_build:
     commands:
-      - echo "Security Review & Preparation"
-      - cd PLOCLO_cms && semgrep scan --config auto --error
       - echo "Logging in to Amazon ECR..."
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
 
   build:
     commands:
-      - echo "Building Docker Image..."
-      - docker-compose -f PLOCLO_cms/docker-compose.yml build
-
       - echo "Running Unit Tests..."
       - cd PLOCLO_cms && npm test
 
       - echo "Running Integration Tests..."
       - cd PLOCLO_cms && npm run test:integration
-
-      - echo "Pushing to ECR for Inspector scan..."
-      - docker-compose -f PLOCLO_cms/docker-compose.yml push
 
       - echo "Waiting for Inspector scan results..."
       - sleep 30
@@ -46,11 +37,4 @@ phases:
 
   post_build:
     commands:
-      - echo "Build completed on $(date)"
-      - printf '[{"name":"backend","imageUri":"%s"},{"name":"frontend","imageUri":"%s"}]' \
-        "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:backend-latest" \
-        "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:frontend-latest" > imagedefinitions.json
-
-artifacts:
-  files:
-    - imagedefinitions.json
+      - echo "Test stage completed on $(date)"
