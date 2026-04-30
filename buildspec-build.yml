@@ -13,10 +13,11 @@ phases:
 
   pre_build:
     commands:
-      - export PATH=$HOME/.local/bin:$PATH
-      - echo "Security Review & Preparation"
-      - semgrep scan --config p/default --error --quiet .
-      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+    - export PATH=$HOME/.local/bin:$PATH
+    - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+    - echo "Security Review & Preparation"
+    - semgrep scan --config p/default --error --quiet .
+    - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
 
   build:
     commands:
