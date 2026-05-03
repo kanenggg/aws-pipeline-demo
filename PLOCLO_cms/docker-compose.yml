@@ -33,6 +33,7 @@ services:
       args:
         - DATABASE_URL=${DATABASE_URL}
     container_name: backend
+    image: 068805565861.dkr.ecr.us-east-1.amazonaws.com/${IMAGE_REPO_NAME}:backend-latest
     depends_on:
       postgres:
         condition: service_healthy
@@ -49,6 +50,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      image: 068805565861.dkr.ecr.us-east-1.amazonaws.com/${IMAGE_REPO_NAME}:frontend-latest
     container_name: frontend
     # volumes:
     #   - ./frontend:/app
@@ -59,7 +61,7 @@ services:
       - NODE_ENV=development
     command: npm run dev
     env_file:
-      - ./PLOCLO_cms/.env
+      - ./.env
 
 volumes:
   pgdata:
