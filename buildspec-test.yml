@@ -6,15 +6,15 @@ phases:
       nodejs: 22
     commands:
       - echo "Installing dependencies..."
-      - cd PLOCLO_cms && npm ci
+      - npm ci --prefix PLOCLO_cms
 
   build:
     commands:
       - echo "Running Unit Tests..."
-      - cd PLOCLO_cms && npm test
+      - npm test --prefix PLOCLO_cms
 
       - echo "Running Integration Tests..."
-      - cd PLOCLO_cms && npm run test:integration
+      - npm run test:integration --prefix PLOCLO_cms
 
   post_build:
     commands:
