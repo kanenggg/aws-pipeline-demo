@@ -10,6 +10,7 @@ phases:
 
   pre_build:
     commands:
+      - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - echo "Logging in to Amazon ECR..."
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
 
@@ -25,7 +26,7 @@ phases:
       - sleep 30
       - |
         FINDINGS=$(aws inspector2 list-findings \
-          --filter-criteria '{"ecrImageRepositoryName":[{"comparison":"EQUALS","value":"'"$IMAGE_REPO_NAME"'"}]}' \
+          --filter-criteria '{"ecrImageRepositoryName":[{"comparison":"EQUALS","value":"ploclo-cms"}]}' \
           --query 'findings[?severity==`CRITICAL`]' \
           --output json)
         COUNT=$(echo $FINDINGS | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
