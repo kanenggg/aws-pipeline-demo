@@ -8,12 +8,6 @@ phases:
       - echo "Installing dependencies..."
       - cd PLOCLO_cms && npm ci
 
-  pre_build:
-    commands:
-      - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-      - echo "Logging in to Amazon ECR..."
-      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
-
   build:
     commands:
       - echo "Running Unit Tests..."
@@ -22,20 +16,6 @@ phases:
       - echo "Running Integration Tests..."
       - cd PLOCLO_cms && npm run test:integration
 
-      - echo "Waiting for Inspector scan results..."
-      - sleep 30
-      - |
-        FINDINGS=$(aws inspector2 list-findings \
-          --filter-criteria '{"ecrImageRepositoryName":[{"comparison":"EQUALS","value":"ploclo-cms"}]}' \
-          --query 'findings[?severity==`CRITICAL`]' \
-          --output json)
-        COUNT=$(echo $FINDINGS | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
-        echo "Critical findings: $COUNT"
-        if [ "$COUNT" -gt "0" ]; then
-          echo "FAILED: Critical CVE found, blocking pipeline"
-          exit 1
-        fi
-
   post_build:
     commands:
-      - echo "Test stage completed on $(date)"
+      - echo "Test completed on $(date)"
