@@ -13,6 +13,22 @@ phases:
     commands:
       - export PATH=$HOME/.local/bin:$PATH
       - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - echo "Creating .env file..."
+      - |
+        cat > PLOCLO_cms/.env << EOF
+        DATABASE_URL=$DATABASE_URL
+        DB_HOST=$DB_HOST
+        DB_PORT=$DB_PORT
+        DB_USER=$DB_USER
+        DB_PASSWORD=$DB_PASSWORD
+        DB_NAME=$DB_NAME
+        JWT_SECRET=$JWT_SECRET
+        GOOGLE_CLIENT_ID=$GOOGLE_CLIENT_ID
+        GOOGLE_CLIENT_SECRET=$GOOGLE_CLIENT_SECRET
+        GOOGLE_CALLBACK_URL=$GOOGLE_CALLBACK_URL
+        NODE_ENV=$NODE_ENV
+        NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+        EOF
       - echo "Security Review & Preparation"
       - semgrep scan --config p/default --error --quiet .
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
@@ -20,7 +36,7 @@ phases:
   build:
     commands:
       - echo "Building Docker Image..."
-      - docker-compose -f PLOCLO_cms/docker-compose.yml build
+      - docker-compose -f PLOCLO_cms/docker-compose.yml build 2>&1
 
   post_build:
     commands:
