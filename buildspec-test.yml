@@ -16,6 +16,14 @@ phases:
       - echo "Running Integration Tests..."
       - npm run test:integration --prefix PLOCLO_cms
 
+      - echo "Running npm audit..."
+      - npm audit --prefix PLOCLO_cms --json > audit-report.json || true
+
   post_build:
     commands:
       - echo "Test completed on $(date)"
+
+artifacts:
+  files:
+    - audit-report.json
+  name: SourceCodeArtifacts
