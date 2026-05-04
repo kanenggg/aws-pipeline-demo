@@ -38,29 +38,29 @@ phases:
       - echo "Building Docker Image..."
       - docker-compose -f PLOCLO_cms/docker-compose.yml build 2>&1
 
-post_build:
-  commands:
-    - echo "Pushing to ECR..."
-    - docker-compose -f PLOCLO_cms/docker-compose.yml push
+  post_build:                     # ← เพิ่ม 2 spaces ตรงนี้
+    commands:
+      - echo "Pushing to ECR..."
+      - docker-compose -f PLOCLO_cms/docker-compose.yml push
 
-    - echo "Waiting for Inspector scan..."
-    - sleep 30
-    - |
-      FINDINGS=$(aws inspector2 list-findings \
-        --filter-criteria '{"ecrImageRepositoryName":[{"comparison":"EQUALS","value":"'"$IMAGE_REPO_NAME"'"}]}' \
-        --query 'findings[?severity==`CRITICAL`]' \
-        --output json)
-      COUNT=$(echo $FINDINGS | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
-      echo "Critical findings: $COUNT"
-      if [ "$COUNT" -gt "0" ]; then
-        echo "FAILED: Critical CVE found, blocking pipeline"
-        exit 1
-      fi
+      - echo "Waiting for Inspector scan..."
+      - sleep 30
+      - |
+        FINDINGS=$(aws inspector2 list-findings \
+          --filter-criteria '{"ecrImageRepositoryName":[{"comparison":"EQUALS","value":"'"$IMAGE_REPO_NAME"'"}]}' \
+          --query 'findings[?severity==`CRITICAL`]' \
+          --output json)
+        COUNT=$(echo $FINDINGS | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
+        echo "Critical findings: $COUNT"
+        if [ "$COUNT" -gt "0" ]; then
+          echo "FAILED: Critical CVE found, blocking pipeline"
+          exit 1
+        fi
 
-    - echo "Build completed on $(date)"
-    - printf '[{"name":"backend","imageUri":"%s"},{"name":"frontend","imageUri":"%s"}]' \
-      "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:backend-latest" \
-      "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:frontend-latest" > imagedefinitions.json
+      - echo "Build completed on $(date)"
+      - printf '[{"name":"backend","imageUri":"%s"},{"name":"frontend","imageUri":"%s"}]' \
+        "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:backend-latest" \
+        "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:frontend-latest" > imagedefinitions.json
 
 artifacts:
   files:
