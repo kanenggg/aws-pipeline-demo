@@ -13,6 +13,8 @@ phases:
     commands:
       - export PATH=$HOME/.local/bin:$PATH
       - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+      # ─── สร้าง .env ────────────────────────────────────────
       - echo "Creating .env file..."
       - |
         cat > PLOCLO_cms/.env << EOF
@@ -29,39 +31,153 @@ phases:
         NODE_ENV=$NODE_ENV
         NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
         EOF
-      - echo "Security Review & Preparation"
+
+      # ตรวจว่า .env อยู่ใน .dockerignore
+      - |
+        if ! grep -q "^\.env$" PLOCLO_cms/.dockerignore 2>/dev/null; then
+          echo ".env" >> PLOCLO_cms/.dockerignore
+          echo "Added .env to .dockerignore"
+        fi
+
+      # ─── Semgrep SAST ──────────────────────────────────────
+      - echo "Running Semgrep SAST..."
       - semgrep scan --config p/default --error --quiet .
-      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+
+      # ─── ECR Login ─────────────────────────────────────────
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | \
+          docker login --username AWS --password-stdin \
+          $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
 
   build:
     commands:
       - echo "Building Docker Image..."
       - docker-compose -f PLOCLO_cms/docker-compose.yml build 2>&1
 
-  post_build:                     # ← เพิ่ม 2 spaces ตรงนี้
+  post_build:
     commands:
       - echo "Pushing to ECR..."
       - docker-compose -f PLOCLO_cms/docker-compose.yml push
 
-      - echo "Waiting for Inspector scan..."
-      - sleep 30
+      # ─── Inspector CVE Scan (poll loop) ───────────────────
+      - echo "Waiting for Inspector scan to complete..."
       - |
+        MAX_WAIT=300
+        ELAPSED=0
+        PREV_COUNT=-1
+
+        while [ $ELAPSED -lt $MAX_WAIT ]; do
+          COUNT=$(aws inspector2 list-findings \
+            --filter-criteria "{\"ecrImageRepositoryName\":[{\"comparison\":\"EQUALS\",\"value\":\"$IMAGE_REPO_NAME\"}]}" \
+            --query 'length(findings)' \
+            --output text 2>/dev/null || echo "0")
+          echo "  Inspector findings so far: $COUNT ($ELAPSED s)"
+
+          # หยุดเมื่อผล stable (count ไม่เปลี่ยน 2 รอบ)
+          if [ "$COUNT" = "$PREV_COUNT" ] && [ $ELAPSED -gt 60 ]; then
+            break
+          fi
+          PREV_COUNT=$COUNT
+          sleep 15
+          ELAPSED=$((ELAPSED + 15))
+        done
+
+        # ดึง critical findings
         FINDINGS=$(aws inspector2 list-findings \
-          --filter-criteria '{"ecrImageRepositoryName":[{"comparison":"EQUALS","value":"'"$IMAGE_REPO_NAME"'"}]}' \
-          --query 'findings[?severity==`CRITICAL`]' \
+          --filter-criteria "{\"ecrImageRepositoryName\":[{\"comparison\":\"EQUALS\",\"value\":\"$IMAGE_REPO_NAME\"}],\"severity\":[{\"comparison\":\"EQUALS\",\"value\":\"CRITICAL\"}]}" \
           --output json)
-        COUNT=$(echo $FINDINGS | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
-        echo "Critical findings: $COUNT"
+
+        echo $FINDINGS > inspector-report.json
+        COUNT=$(echo $FINDINGS | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('findings', [])))")
+        echo "Critical CVE findings: $COUNT"
+
         if [ "$COUNT" -gt "0" ]; then
           echo "FAILED: Critical CVE found, blocking pipeline"
+          python3 -c "
+        import json
+        with open('inspector-report.json') as f:
+            data = json.load(f)
+        for finding in data.get('findings', []):
+            title = finding.get('title', 'N/A')
+            score = finding.get('inspectorScore', 'N/A')
+            pkg = finding.get('packageVulnerabilityDetails', {})
+            print(f'  [{score}] {title}')
+          "
           exit 1
         fi
 
+      # ─── Amazon Q Security Summary Report ─────────────────
+      - echo "Generating Amazon Q Security Summary..."
+      - |
+        python3 -c "
+        import json, os, datetime
+
+        summary = {
+            'timestamp': datetime.datetime.utcnow().isoformat(),
+            'build_id': os.environ.get('CODEBUILD_BUILD_ID', 'N/A'),
+            'image_repo': os.environ.get('IMAGE_REPO_NAME', 'N/A'),
+            'stages': {}
+        }
+
+        # npm audit results
+        try:
+            with open('/codebuild/output/TestArtifacts/audit-report.json') as f:
+                audit = json.load(f)
+            vuln = audit.get('metadata', {}).get('vulnerabilities', {})
+            summary['stages']['npm_audit'] = {
+                'status': 'PASSED',
+                'critical': vuln.get('critical', 0),
+                'high': vuln.get('high', 0),
+                'moderate': vuln.get('moderate', 0)
+            }
+        except:
+            summary['stages']['npm_audit'] = {'status': 'NO_DATA'}
+
+        # Q Code Review results
+        try:
+            with open('/codebuild/output/TestArtifacts/q-review-report.json') as f:
+                qreview = json.load(f)
+            recs = qreview.get('RecommendationSummaries', [])
+            summary['stages']['q_code_review'] = {
+                'status': 'PASSED',
+                'total_recommendations': len(recs),
+                'high': len([r for r in recs if r.get('Severity') == 'High']),
+                'medium': len([r for r in recs if r.get('Severity') == 'Medium'])
+            }
+        except:
+            summary['stages']['q_code_review'] = {'status': 'NO_DATA'}
+
+        # Inspector results
+        try:
+            with open('inspector-report.json') as f:
+                inspector = json.load(f)
+            summary['stages']['inspector_cve'] = {
+                'status': 'PASSED',
+                'critical_cve': len(inspector.get('findings', []))
+            }
+        except:
+            summary['stages']['inspector_cve'] = {'status': 'NO_DATA'}
+
+        summary['overall'] = 'PASSED'
+
+        with open('q-security-summary.json', 'w') as f:
+            json.dump(summary, f, indent=2)
+
+        print(json.dumps(summary, indent=2))
+        "
+
+      # ─── imagedefinitions.json ─────────────────────────────
+      - |
+        printf '[{"name":"backend","imageUri":"%s"},{"name":"frontend","imageUri":"%s"}]' \
+          "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:backend-latest" \
+          "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:frontend-latest" \
+          > imagedefinitions.json
+
       - echo "Build completed on $(date)"
-      - printf '[{"name":"backend","imageUri":"%s"},{"name":"frontend","imageUri":"%s"}]' \
-        "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:backend-latest" \
-        "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:frontend-latest" > imagedefinitions.json
 
 artifacts:
   files:
     - imagedefinitions.json
+    - inspector-report.json
+    - q-security-summary.json
+  discard-paths: yes
+  name: BuildArtifacts

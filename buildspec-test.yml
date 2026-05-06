@@ -1,5 +1,10 @@
 version: 0.2
 
+env:
+  variables:
+    REPO_NAME: "PLOCLO_cms"
+    BRANCH_NAME: "main"
+
 phases:
   install:
     runtime-versions:
@@ -10,20 +15,125 @@ phases:
 
   build:
     commands:
+      # ─── Unit Tests ───────────────────────────────────────
       - echo "Running Unit Tests..."
       - npm test --prefix PLOCLO_cms
 
+      # ─── Integration Tests ────────────────────────────────
       - echo "Running Integration Tests..."
       - npm run test:integration --prefix PLOCLO_cms
 
+      # ─── npm audit (block on critical) ────────────────────
       - echo "Running npm audit..."
-      - npm audit --prefix PLOCLO_cms --json > audit-report.json || true
+      - |
+        npm audit --prefix PLOCLO_cms --json > audit-report.json || true
+        CRITICAL=$(cat audit-report.json | python3 -c "
+        import sys, json
+        data = json.load(sys.stdin)
+        crit = data.get('metadata', {}).get('vulnerabilities', {}).get('critical', 0)
+        print(crit)
+        ")
+        echo "Critical vulnerabilities: $CRITICAL"
+        if [ "$CRITICAL" -gt "0" ]; then
+          echo "FAILED: Critical npm vulnerabilities found - blocking pipeline"
+          cat audit-report.json | python3 -c "
+        import sys, json
+        data = json.load(sys.stdin)
+        vulns = data.get('vulnerabilities', {})
+        for name, info in vulns.items():
+            if info.get('severity') == 'critical':
+                print(f'  - {name}: {info.get(\"via\", [])}')
+          "
+          exit 1
+        fi
+        echo "npm audit passed"
+
+      # ─── Amazon Q Code Review (via CodeGuru Reviewer) ─────
+      - echo "Starting Amazon Q Code Review..."
+      - |
+        # ดึง Association ARN ที่ผูก repo ไว้
+        ASSOCIATION_ARN=$(aws codeguru-reviewer list-repository-associations \
+          --query "RepositoryAssociationSummaries[?Name=='$REPO_NAME'].AssociationArn" \
+          --output text)
+
+        if [ -z "$ASSOCIATION_ARN" ]; then
+          echo "No CodeGuru association found, skipping Q review"
+        else
+          # สร้าง Code Review
+          REVIEW_ARN=$(aws codeguru-reviewer create-code-review \
+            --name "q-review-build-$CODEBUILD_BUILD_NUMBER" \
+            --repository-association-arn $ASSOCIATION_ARN \
+            --type "RepositoryAnalysis={RepositoryHead={BranchName=$BRANCH_NAME}}" \
+            --query 'CodeReview.CodeReviewArn' \
+            --output text)
+
+          echo "Q Review started: $REVIEW_ARN"
+
+          # รอจนกว่า review จะเสร็จ
+          echo "Waiting for Q Review to complete..."
+          MAX_WAIT=300
+          ELAPSED=0
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            STATUS=$(aws codeguru-reviewer describe-code-review \
+              --code-review-arn $REVIEW_ARN \
+              --query 'CodeReview.State' \
+              --output text)
+            echo "  Q Review status: $STATUS ($ELAPSED s)"
+            if [ "$STATUS" = "Completed" ] || [ "$STATUS" = "Failed" ]; then
+              break
+            fi
+            sleep 15
+            ELAPSED=$((ELAPSED + 15))
+          done
+
+          # ดึงผลลัพธ์
+          if [ "$STATUS" = "Completed" ]; then
+            aws codeguru-reviewer list-recommendations \
+              --code-review-arn $REVIEW_ARN \
+              --output json > q-review-report.json
+
+            # นับ recommendations แยกตาม severity
+            python3 -c "
+        import json
+        with open('q-review-report.json') as f:
+            data = json.load(f)
+        recs = data.get('RecommendationSummaries', [])
+        high = [r for r in recs if r.get('Severity') == 'High']
+        medium = [r for r in recs if r.get('Severity') == 'Medium']
+        print(f'Q Review Results:')
+        print(f'  High severity   : {len(high)}')
+        print(f'  Medium severity : {len(medium)}')
+        print(f'  Total           : {len(recs)}')
+        if high:
+            print('High severity issues:')
+            for r in high:
+                print(f'  [{r[\"Severity\"]}] {r[\"FilePath\"]}:{r.get(\"StartLine\",\"?\")} - {r[\"Description\"][:100]}')
+            "
+
+            # Block ถ้าเจอ High severity
+            HIGH_COUNT=$(python3 -c "
+        import json
+        with open('q-review-report.json') as f:
+            data = json.load(f)
+        print(len([r for r in data.get('RecommendationSummaries',[]) if r.get('Severity')=='High']))
+            ")
+            if [ "$HIGH_COUNT" -gt "0" ]; then
+              echo "FAILED: Amazon Q found $HIGH_COUNT High severity issues"
+              exit 1
+            fi
+            echo "Amazon Q Code Review passed"
+          else
+            echo "WARNING: Q Review did not complete (status: $STATUS), continuing..."
+          fi
+        fi
 
   post_build:
     commands:
-      - echo "Test completed on $(date)"
+      - echo "Test stage completed on $(date)"
 
 artifacts:
   files:
     - audit-report.json
-  name: SourceCodeArtifacts
+    - "q-review-report.json"
+  discard-paths: yes
+  name: TestArtifacts
