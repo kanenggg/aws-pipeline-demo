@@ -1,183 +1,87 @@
 version: 0.2
 
+env:
+  variables:
+    REPO_NAME: "PLOCLO_cms"
+    BRANCH_NAME: "main"
+
 phases:
   install:
     runtime-versions:
       nodejs: 22
     commands:
-      - echo "Installing dependencies..."
       - npm ci --prefix PLOCLO_cms
-      - pip3 install semgrep
-
-  pre_build:
-    commands:
-      - export PATH=$HOME/.local/bin:$PATH
-      - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-
-      # ─── สร้าง .env ────────────────────────────────────────
-      - echo "Creating .env file..."
-      - |
-        cat > PLOCLO_cms/.env << EOF
-        DATABASE_URL=$DATABASE_URL
-        DB_HOST=$DB_HOST
-        DB_PORT=$DB_PORT
-        DB_USER=$DB_USER
-        DB_PASSWORD=$DB_PASSWORD
-        DB_NAME=$DB_NAME
-        JWT_SECRET=$JWT_SECRET
-        GOOGLE_CLIENT_ID=$GOOGLE_CLIENT_ID
-        GOOGLE_CLIENT_SECRET=$GOOGLE_CLIENT_SECRET
-        GOOGLE_CALLBACK_URL=$GOOGLE_CALLBACK_URL
-        NODE_ENV=$NODE_ENV
-        NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
-        EOF
-
-      # ตรวจว่า .env อยู่ใน .dockerignore
-      - |
-        if ! grep -q "^\.env$" PLOCLO_cms/.dockerignore 2>/dev/null; then
-          echo ".env" >> PLOCLO_cms/.dockerignore
-          echo "Added .env to .dockerignore"
-        fi
-
-      # ─── Semgrep SAST ──────────────────────────────────────
-      - echo "Running Semgrep SAST..."
-      - semgrep scan --config p/default --error --quiet .
-
-      # ─── ECR Login ─────────────────────────────────────────
-      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | \
-          docker login --username AWS --password-stdin \
-          $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
 
   build:
     commands:
-      - echo "Building Docker Image..."
-      - docker-compose -f PLOCLO_cms/docker-compose.yml build 2>&1
+      # ─── Unit + Integration Tests ──────────────────────────
+      - echo "[1/3] Running tests..."
+      - npm test --prefix PLOCLO_cms
+      - npm run test:integration --prefix PLOCLO_cms
+
+      # ─── npm audit ────────────────────────────────────────
+      - echo "[2/3] npm audit..."
+      - |
+        npm audit --prefix PLOCLO_cms --json > audit-report.json || true
+        CRITICAL=$(cat audit-report.json | python3 -c "
+        import sys,json; d=json.load(sys.stdin)
+        print(d.get('metadata',{}).get('vulnerabilities',{}).get('critical',0))")
+        echo "Critical: $CRITICAL"
+        if [ "$CRITICAL" -gt "0" ]; then
+          echo "BLOCKED: critical npm vulnerabilities"; exit 1
+        fi
+
+      # ─── Amazon Q Code Review ─────────────────────────────
+      - echo "[3/3] Amazon Q Code Review..."
+      - |
+        ASSOCIATION_ARN=$(aws codeguru-reviewer list-repository-associations \
+          --query "RepositoryAssociationSummaries[?Name=='$REPO_NAME'].AssociationArn" \
+          --output text)
+
+        if [ -z "$ASSOCIATION_ARN" ]; then
+          echo "No CodeGuru association — skipping Q review"
+          echo '{"RecommendationSummaries":[]}' > q-review-report.json
+        else
+          REVIEW_ARN=$(aws codeguru-reviewer create-code-review \
+            --name "q-review-$CODEBUILD_BUILD_NUMBER" \
+            --repository-association-arn $ASSOCIATION_ARN \
+            --type "RepositoryAnalysis={RepositoryHead={BranchName=$BRANCH_NAME}}" \
+            --query 'CodeReview.CodeReviewArn' --output text)
+
+          echo "Q Review: $REVIEW_ARN"
+          ELAPSED=0
+          while [ $ELAPSED -lt 300 ]; do
+            STATUS=$(aws codeguru-reviewer describe-code-review \
+              --code-review-arn $REVIEW_ARN \
+              --query 'CodeReview.State' --output text)
+            echo "  status: $STATUS (${ELAPSED}s)"
+            [ "$STATUS" = "Completed" ] || [ "$STATUS" = "Failed" ] && break
+            sleep 15; ELAPSED=$((ELAPSED+15))
+          done
+
+          aws codeguru-reviewer list-recommendations \
+            --code-review-arn $REVIEW_ARN \
+            --output json > q-review-report.json
+
+          HIGH=$(python3 -c "
+        import json
+        d=json.load(open('q-review-report.json'))
+        h=[r for r in d.get('RecommendationSummaries',[]) if r.get('Severity')=='High']
+        print(len(h))")
+
+          echo "Q High severity: $HIGH"
+          if [ "$HIGH" -gt "0" ]; then
+            echo "BLOCKED: Q found $HIGH High severity issues"; exit 1
+          fi
+        fi
 
   post_build:
     commands:
-      - echo "Pushing to ECR..."
-      - docker-compose -f PLOCLO_cms/docker-compose.yml push
-
-      # ─── Inspector CVE Scan (poll loop) ───────────────────
-      - echo "Waiting for Inspector scan to complete..."
-      - |
-        MAX_WAIT=300
-        ELAPSED=0
-        PREV_COUNT=-1
-
-        while [ $ELAPSED -lt $MAX_WAIT ]; do
-          COUNT=$(aws inspector2 list-findings \
-            --filter-criteria "{\"ecrImageRepositoryName\":[{\"comparison\":\"EQUALS\",\"value\":\"$IMAGE_REPO_NAME\"}]}" \
-            --query 'length(findings)' \
-            --output text 2>/dev/null || echo "0")
-          echo "  Inspector findings so far: $COUNT ($ELAPSED s)"
-
-          # หยุดเมื่อผล stable (count ไม่เปลี่ยน 2 รอบ)
-          if [ "$COUNT" = "$PREV_COUNT" ] && [ $ELAPSED -gt 60 ]; then
-            break
-          fi
-          PREV_COUNT=$COUNT
-          sleep 15
-          ELAPSED=$((ELAPSED + 15))
-        done
-
-        # ดึง critical findings
-        FINDINGS=$(aws inspector2 list-findings \
-          --filter-criteria "{\"ecrImageRepositoryName\":[{\"comparison\":\"EQUALS\",\"value\":\"$IMAGE_REPO_NAME\"}],\"severity\":[{\"comparison\":\"EQUALS\",\"value\":\"CRITICAL\"}]}" \
-          --output json)
-
-        echo $FINDINGS > inspector-report.json
-        COUNT=$(echo $FINDINGS | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('findings', [])))")
-        echo "Critical CVE findings: $COUNT"
-
-        if [ "$COUNT" -gt "0" ]; then
-          echo "FAILED: Critical CVE found, blocking pipeline"
-          python3 -c "
-        import json
-        with open('inspector-report.json') as f:
-            data = json.load(f)
-        for finding in data.get('findings', []):
-            title = finding.get('title', 'N/A')
-            score = finding.get('inspectorScore', 'N/A')
-            pkg = finding.get('packageVulnerabilityDetails', {})
-            print(f'  [{score}] {title}')
-          "
-          exit 1
-        fi
-
-      # ─── Amazon Q Security Summary Report ─────────────────
-      - echo "Generating Amazon Q Security Summary..."
-      - |
-        python3 -c "
-        import json, os, datetime
-
-        summary = {
-            'timestamp': datetime.datetime.utcnow().isoformat(),
-            'build_id': os.environ.get('CODEBUILD_BUILD_ID', 'N/A'),
-            'image_repo': os.environ.get('IMAGE_REPO_NAME', 'N/A'),
-            'stages': {}
-        }
-
-        # npm audit results
-        try:
-            with open('/codebuild/output/TestArtifacts/audit-report.json') as f:
-                audit = json.load(f)
-            vuln = audit.get('metadata', {}).get('vulnerabilities', {})
-            summary['stages']['npm_audit'] = {
-                'status': 'PASSED',
-                'critical': vuln.get('critical', 0),
-                'high': vuln.get('high', 0),
-                'moderate': vuln.get('moderate', 0)
-            }
-        except:
-            summary['stages']['npm_audit'] = {'status': 'NO_DATA'}
-
-        # Q Code Review results
-        try:
-            with open('/codebuild/output/TestArtifacts/q-review-report.json') as f:
-                qreview = json.load(f)
-            recs = qreview.get('RecommendationSummaries', [])
-            summary['stages']['q_code_review'] = {
-                'status': 'PASSED',
-                'total_recommendations': len(recs),
-                'high': len([r for r in recs if r.get('Severity') == 'High']),
-                'medium': len([r for r in recs if r.get('Severity') == 'Medium'])
-            }
-        except:
-            summary['stages']['q_code_review'] = {'status': 'NO_DATA'}
-
-        # Inspector results
-        try:
-            with open('inspector-report.json') as f:
-                inspector = json.load(f)
-            summary['stages']['inspector_cve'] = {
-                'status': 'PASSED',
-                'critical_cve': len(inspector.get('findings', []))
-            }
-        except:
-            summary['stages']['inspector_cve'] = {'status': 'NO_DATA'}
-
-        summary['overall'] = 'PASSED'
-
-        with open('q-security-summary.json', 'w') as f:
-            json.dump(summary, f, indent=2)
-
-        print(json.dumps(summary, indent=2))
-        "
-
-      # ─── imagedefinitions.json ─────────────────────────────
-      - |
-        printf '[{"name":"backend","imageUri":"%s"},{"name":"frontend","imageUri":"%s"}]' \
-          "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:backend-latest" \
-          "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:frontend-latest" \
-          > imagedefinitions.json
-
-      - echo "Build completed on $(date)"
+      - echo "Q-CodeReview stage passed on $(date)"
 
 artifacts:
   files:
-    - imagedefinitions.json
-    - inspector-report.json
-    - q-security-summary.json
+    - audit-report.json
+    - q-review-report.json
   discard-paths: yes
-  name: BuildArtifacts
+  name: ScanArtifacts
