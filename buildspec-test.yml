@@ -30,13 +30,9 @@ phases:
 
       - echo "[3/3] Semgrep SAST + Amazon Q Dev Analysis..."
       - |
+        # ใช้ p/default แทน เพราะไม่ต้อง login
         semgrep scan PLOCLO_cms/ \
-          --config "p/typescript" \
-          --config "p/nodejs" \
-          --config "p/jwt" \
-          --config "p/sql-injection" \
-          --config "p/xss" \
-          --config "p/owasp-top-ten" \
+          --config "p/default" \
           --json \
           --output semgrep-report.json \
           --exclude "node_modules" \
