@@ -1,5 +1,117 @@
 version: 0.2
 
+phases:
+  install:
+    runtime-versions:
+      nodejs: 22
+    commands:
+      - npm ci --prefix PLOCLO_cms
+      - pip3 install semgrep
+
+  pre_build:
+    commands:
+      - export PATH=$HOME/.local/bin:/usr/local/bin:$PATH   # ← แก้ exit 127
+      - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+      - |
+        cat > PLOCLO_cms/.env << EOF
+        DATABASE_URL=$DATABASE_URL
+        DB_HOST=$DB_HOST
+        DB_PORT=$DB_PORT
+        DB_USER=$DB_USER
+        DB_PASSWORD=$DB_PASSWORD
+        DB_NAME=$DB_NAME
+        JWT_SECRET=$JWT_SECRET
+        GOOGLE_CLIENT_ID=$GOOGLE_CLIENT_ID
+        GOOGLE_CLIENT_SECRET=$GOOGLE_CLIENT_SECRET
+        GOOGLE_CALLBACK_URL=$GOOGLE_CALLBACK_URL
+        NODE_ENV=$NODE_ENV
+        NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+        EOF
+
+      - grep -q "^\.env$" PLOCLO_cms/.dockerignore 2>/dev/null || echo ".env" >> PLOCLO_cms/.dockerignore
+
+      # ─── Semgrep SAST ──────────────────────────────────────
+      - echo "[1/3] Semgrep SAST..."
+      - semgrep scan --config p/default --error --quiet . --json > semgrep-report.json || true
+
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | \
+          docker login --username AWS --password-stdin \
+          $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+
+  build:
+    commands:
+      - echo "[2/3] Docker build..."
+      - docker-compose -f PLOCLO_cms/docker-compose.yml build 2>&1
+
+  post_build:
+    commands:
+      - echo "[3/3] Push + Inspector..."
+      - docker-compose -f PLOCLO_cms/docker-compose.yml push
+
+      # ─── Inspector CVE Poll ────────────────────────────────
+      - |
+        MAX_WAIT=300; ELAPSED=0; PREV=-1
+        while [ $ELAPSED -lt $MAX_WAIT ]; do
+          COUNT=$(aws inspector2 list-findings \
+            --filter-criteria "{\"ecrImageRepositoryName\":[{\"comparison\":\"EQUALS\",\"value\":\"$IMAGE_REPO_NAME\"}]}" \
+            --query 'length(findings)' --output text 2>/dev/null || echo 0)
+          echo "  Inspector findings: $COUNT (${ELAPSED}s)"
+          [ "$COUNT" = "$PREV" ] && [ $ELAPSED -gt 60 ] && break
+          PREV=$COUNT; sleep 15; ELAPSED=$((ELAPSED+15))
+        done
+
+        aws inspector2 list-findings \
+          --filter-criteria "{\"ecrImageRepositoryName\":[{\"comparison\":\"EQUALS\",\"value\":\"$IMAGE_REPO_NAME\"}],\"severity\":[{\"comparison\":\"EQUALS\",\"value\":\"CRITICAL\"}]}" \
+          --output json > inspector-report.json
+
+        CVE=$(python3 -c "import json; d=json.load(open('inspector-report.json')); print(len(d.get('findings',[])))")
+        echo "Critical CVE: $CVE"
+        if [ "$CVE" -gt "0" ]; then
+          echo "BLOCKED: Critical CVE found"; exit 1
+        fi
+
+      # ─── Amazon Q Security Summary ─────────────────────────
+      - |
+        python3 -c "
+        import json, os, datetime
+        summary = {
+          'timestamp': datetime.datetime.utcnow().isoformat(),
+          'build_id': os.environ.get('CODEBUILD_BUILD_ID',''),
+          'semgrep_findings': 0,
+          'cve_critical': 0,
+          'status': 'PASSED'
+        }
+        try:
+          d = json.load(open('semgrep-report.json'))
+          summary['semgrep_findings'] = len(d.get('results',[]))
+        except: pass
+        try:
+          d = json.load(open('inspector-report.json'))
+          summary['cve_critical'] = len(d.get('findings',[]))
+        except: pass
+        json.dump(summary, open('q-build-summary.json','w'), indent=2)
+        print(json.dumps(summary, indent=2))
+        "
+
+      - |
+        printf '[{"name":"backend","imageUri":"%s"},{"name":"frontend","imageUri":"%s"}]' \
+          "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:backend-latest" \
+          "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:frontend-latest" \
+          > imagedefinitions.json
+
+artifacts:
+  files:
+    - imagedefinitions.json
+    - semgrep-report.json
+    - inspector-report.json
+    - q-build-summary.json
+  discard-paths: yes
+  name: BuildArtifacts
+
+
+  version: 0.2
+
 env:
   variables:
     REPO_NAME: "PLOCLO_cms"
@@ -78,75 +190,3 @@ phases:
           echo "BLOCKED: Q found $BLOCK Critical/High issues"; exit 1
         fi
         echo "Q Security Scan passed"
-
-  post_build:
-    commands:
-      - echo "Scan stage completed on $(date)"
-      - |
-        if [ "$CODEBUILD_BUILD_SUCCEEDING" = "0" ]; then
-          echo "Build failed - sending to Amazon Q for analysis..."
-
-          BUILD_LOG=$(aws logs get-log-events \
-            --log-group-name /aws/codebuild/$(echo $CODEBUILD_BUILD_ID | cut -d: -f1) \
-            --log-stream-name $(echo $CODEBUILD_BUILD_ID | cut -d: -f2) \
-            --limit 100 \
-            --query 'events[*].message' \
-            --output text 2>/dev/null | tail -80 || \
-            echo "Could not fetch logs")
-
-          python3 << PYEOF
-
-          import boto3, json, os
-
-          bedrock = boto3.client('bedrock-runtime', region_name=os.environ['AWS_DEFAULT_REGION'])
-
-          build_log = os.popen("echo '$BUILD_LOG'").read()
-
-          prompt = f"""You are a DevSecOps expert on AWS.
-          Analyze this CodeBuild failure and respond in Thai language with these sections:
-          1. Root Cause
-          2. Fix Steps
-          3. Prevention
-
-          Build ID: {os.environ.get('CODEBUILD_BUILD_ID','')}
-
-          Log:
-          {build_log}
-          """
-
-         response = bedrock.invoke_model(
-           modelId='amazon.nova-pro-v1:0',
-           body=json.dumps({
-           "messages": [{"role": "user", "content": prompt}],
-           "inferenceConfig": {"maxTokens": 1000, "temperature": 0.3}
-            })
-          )
-
-         result = json.loads(response['body'].read())
-         analysis = result['output']['message']['content'][0]['text']
-
-         with open('q-analysis.txt', 'w') as f:
-         f.write(analysis)
-
-         print("=== Amazon Q Analysis ===")
-         print(analysis)
-
-        topic = os.environ.get('SNS_TOPIC_ARN', '')
-        if topic:
-           sns = boto3.client('sns')
-           sns.publish(
-           TopicArn=topic,
-           Subject="[FAILED] Pipeline Failed - Q Analysis",
-           Message="Build: " + os.environ.get('CODEBUILD_BUILD_ID','') + "\n\n=== Q Analysis ===\n" + analysis
-           )
-           print("Notification sent!")
-           PYEOF
-         fi
-
-artifacts:
-  files:
-    - audit-report.json
-    - q-security-findings.json
-    - q-analysis.txt
-  discard-paths: yes
-  name: ScanArtifacts
