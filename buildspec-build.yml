@@ -10,13 +10,8 @@ phases:
 
   pre_build:
     commands:
-      - echo "Starting Docker daemon..."
-      - nohup /usr/local/bin/dockerd \
-          --host=unix:///var/run/docker.sock \
-          --host=tcp://127.0.0.1:2375 \
-          --storage-driver=overlay2 &
-      - timeout 30 sh -c "until docker info > /dev/null 2>&1; do echo 'Waiting for Docker...'; sleep 2; done"
-      - echo "Docker is ready"
+      - echo "Checking Docker..."
+      - docker info > /dev/null 2>&1 && echo "Docker ready" || (echo "Docker not available - enable Privileged mode"; exit 1)
 
       - |
         cat > PLOCLO_cms/.env << EOF
@@ -36,9 +31,7 @@ phases:
 
       - grep -q "^\.env$" PLOCLO_cms/.dockerignore 2>/dev/null || echo ".env" >> PLOCLO_cms/.dockerignore
 
-      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | \
-          docker login --username AWS --password-stdin \
-          $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
 
   build:
     commands:
