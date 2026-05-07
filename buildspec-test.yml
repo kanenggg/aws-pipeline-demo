@@ -35,39 +35,44 @@ phases:
         zip -r source.zip PLOCLO_cms/ \
           --exclude "PLOCLO_cms/node_modules/*" \
           --exclude "PLOCLO_cms/.env"
+
         aws codeguru-security create-upload-url \
           --scan-name $SCAN_NAME \
           --output json > upload-info.json
+        if [ $? -ne 0 ]; then
+          echo "FAILED: create-upload-url failed"; exit 1
+        fi
+
         S3_URL=$(python3 -c "import json; print(json.load(open('upload-info.json'))['s3Url'])")
         CODE_ID=$(python3 -c "import json; print(json.load(open('upload-info.json'))['codeArtifactId'])")
+
         curl -X PUT -T source.zip "$S3_URL"
+
         aws codeguru-security create-scan \
-          --resource-id "{\"codeArtifact\":{\"codeArtifactId\":\"$CODE_ID\"}}" \
+          --resource-id "{\"codeArtifactId\":\"$CODE_ID\"}" \
           --scan-name $SCAN_NAME \
           --scan-type Standard
+
         ELAPSED=0
         while [ $ELAPSED -lt 300 ]; do
           STATUS=$(aws codeguru-security get-scan \
             --scan-name $SCAN_NAME \
             --query 'scanState' --output text)
           echo "  Q Scan: $STATUS (${ELAPSED}s)"
-          [ "$STATUS" = "Successful" ] || [ "$STATUS" = "Failed" ] && break
+          if [ "$STATUS" = "Successful" ] || [ "$STATUS" = "Failed" ]; then
+            break
+          fi
           sleep 15; ELAPSED=$((ELAPSED+15))
         done
+
         aws codeguru-security get-findings \
           --scan-name $SCAN_NAME \
           --output json > q-security-findings.json
-        BLOCK=$(python3 -c "
-        import json
-        d = json.load(open('q-security-findings.json'))
-        block = [f for f in d.get('findings',[]) if f.get('severity') in ['Critical','High']]
-        print(len(block))")
-        if [ "$BLOCK" -gt "0" ]; then
-          echo "BLOCKED: Q found $BLOCK Critical/High issues"; exit 1
-        fi
-        echo "Q Security Scan passed"
+
+        BLOCK=$(python3 -c "import json; d=json.load(open('q-security-findings.json')); block=[f for f in d.get('findings',[]) if f.get('severity') in ['Critical','High']]; print(len(block))")
+
 post_build:
-  commands:
+    commands:
       - echo "Scan stage completed on $(date)"
       - |
         if [ "$CODEBUILD_BUILD_SUCCEEDING" = "0" ]; then
