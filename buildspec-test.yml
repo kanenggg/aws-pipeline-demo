@@ -11,6 +11,7 @@ phases:
       nodejs: 22
     commands:
       - npm ci --prefix PLOCLO_cms
+      - pip install semgrep --break-system-packages
 
   build:
     commands:
@@ -21,76 +22,66 @@ phases:
       - echo "[2/3] npm audit..."
       - |
         npm audit --prefix PLOCLO_cms --json > audit-report.json || true
-        CRITICAL=$(cat audit-report.json | python3 -c "
-        import sys,json; d=json.load(sys.stdin)
-        print(d.get('metadata',{}).get('vulnerabilities',{}).get('critical',0))")
+        CRITICAL=$(cat audit-report.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('metadata',{}).get('vulnerabilities',{}).get('critical',0))")
         echo "Critical: $CRITICAL"
         if [ "$CRITICAL" -gt "0" ]; then
           echo "BLOCKED: critical npm vulnerabilities"; exit 1
         fi
 
-      - echo "[3/3] Amazon Q Security Scan..."
+      - echo "[3/3] Semgrep SAST + Amazon Q Dev Analysis..."
       - |
-        SCAN_NAME="q-scan-$CODEBUILD_BUILD_NUMBER"
-        zip -r source.zip PLOCLO_cms/ \
-          --exclude "PLOCLO_cms/node_modules/*" \
-          --exclude "PLOCLO_cms/.env"
+        semgrep scan PLOCLO_cms/ \
+          --config "p/typescript" \
+          --config "p/nodejs" \
+          --config "p/jwt" \
+          --config "p/sql-injection" \
+          --config "p/xss" \
+          --config "p/owasp-top-ten" \
+          --json \
+          --output semgrep-report.json \
+          --exclude "node_modules" \
+          --exclude "*.lock" || true
 
-        aws codeguru-security create-upload-url \
-          --scan-name $SCAN_NAME \
-          --output json > upload-info.json
-        if [ $? -ne 0 ]; then
-          echo "FAILED: create-upload-url failed"; exit 1
+        echo "Semgrep scan complete"
+
+        CRITICAL_COUNT=$(python3 -c "import json; d=json.load(open('semgrep-report.json')); print(len([f for f in d.get('results',[]) if f.get('extra',{}).get('severity')=='ERROR']))")
+
+        HIGH_COUNT=$(python3 -c "import json; d=json.load(open('semgrep-report.json')); print(len([f for f in d.get('results',[]) if f.get('extra',{}).get('severity')=='WARNING']))")
+
+        echo "Semgrep ERROR (Critical): $CRITICAL_COUNT"
+        echo "Semgrep WARNING (High):   $HIGH_COUNT"
+
+        SEMGREP_FINDINGS=$(python3 -c "import json; d=json.load(open('semgrep-report.json')); lines=['['+f.get('extra',{}).get('severity','')+'] '+f.get('check_id','')+' | '+f.get('path','')+':'+str(f.get('start',{}).get('line',''))+' | '+f.get('extra',{}).get('message','')[:200] for f in d.get('results',[])[:30]]; print('\n'.join(lines) if lines else 'No findings')")
+
+        python3 q_analyze_test.py "$SEMGREP_FINDINGS" "$CRITICAL_COUNT" "$HIGH_COUNT"
+        cat q-analysis.txt
+
+        TOTAL=$(( CRITICAL_COUNT + HIGH_COUNT ))
+        if [ "$TOTAL" -gt "0" ]; then
+          echo "============================================"
+          echo "BLOCKED by Amazon Q Dev Security Gate"
+          echo "Critical: $CRITICAL_COUNT | High: $HIGH_COUNT"
+          echo '============================================'
+          echo 'กรุณาอ่าน q-analysis.txt เพื่อดูวิธีแก้ไข'
+          echo '============================================'
+          exit 1
         fi
 
-        S3_URL=$(python3 -c "import json; print(json.load(open('upload-info.json'))['s3Url'])")
-        CODE_ID=$(python3 -c "import json; print(json.load(open('upload-info.json'))['codeArtifactId'])")
+        echo "Security Gate passed — proceeding to BUILD stage"
 
-        curl -X PUT -T source.zip "$S3_URL"
-
-        aws codeguru-security create-scan \
-          --resource-id "{\"codeArtifactId\":\"$CODE_ID\"}" \
-          --scan-name $SCAN_NAME \
-          --scan-type Standard
-
-        ELAPSED=0
-        while [ $ELAPSED -lt 300 ]; do
-          STATUS=$(aws codeguru-security get-scan \
-            --scan-name $SCAN_NAME \
-            --query 'scanState' --output text)
-          echo "  Q Scan: $STATUS (${ELAPSED}s)"
-          if [ "$STATUS" = "Successful" ] || [ "$STATUS" = "Failed" ]; then
-            break
-          fi
-          sleep 15; ELAPSED=$((ELAPSED+15))
-        done
-
-        aws codeguru-security get-findings \
-          --scan-name $SCAN_NAME \
-          --output json > q-security-findings.json
-
-        BLOCK=$(python3 -c "import json; d=json.load(open('q-security-findings.json')); block=[f for f in d.get('findings',[]) if f.get('severity') in ['Critical','High']]; print(len(block))")
-
-post_build:
+  post_build:
     commands:
-      - echo "Scan stage completed on $(date)"
+      - echo "Test stage completed on $(date)"
       - |
         if [ "$CODEBUILD_BUILD_SUCCEEDING" = "0" ]; then
-          BUILD_LOG=$(aws logs get-log-events \
-            --log-group-name /aws/codebuild/$(echo $CODEBUILD_BUILD_ID | cut -d: -f1) \
-            --log-stream-name $(echo $CODEBUILD_BUILD_ID | cut -d: -f2) \
-            --limit 100 \
-            --query 'events[*].message' \
-            --output text 2>/dev/null | tail -80 || \
-            echo "Could not fetch logs")
-
-          python3 q_analyze.py "$BUILD_LOG"
+          echo "Build FAILED — Amazon Q Dev analysis saved to q-analysis.txt"
+          cat q-analysis.txt 2>/dev/null || echo "No analysis available"
         fi
 
 artifacts:
   files:
     - audit-report.json
-    - q-security-findings.json
+    - semgrep-report.json
     - q-analysis.txt
   discard-paths: yes
-  name: SourceCodeArtifacts
+  name: ScanArtifacts
