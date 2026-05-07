@@ -31,57 +31,122 @@ phases:
           echo "BLOCKED: critical npm vulnerabilities"; exit 1
         fi
 
-      # ─── Amazon Q Code Review ─────────────────────────────
-      - echo "[3/3] Amazon Q Code Review..."
+      # ─── CodeGuru Security (Q-powered) ───────────────────
+      - echo "[3/3] Amazon Q Security Scan..."
       - |
-        ASSOCIATION_ARN=$(aws codeguru-reviewer list-repository-associations \
-          --query "RepositoryAssociationSummaries[?Name=='$REPO_NAME'].AssociationArn" \
-          --output text)
+        SCAN_NAME="q-scan-$CODEBUILD_BUILD_NUMBER"
 
-        if [ -z "$ASSOCIATION_ARN" ]; then
-          echo "No CodeGuru association — skipping Q review"
-          echo '{"RecommendationSummaries":[]}' > q-review-report.json
-        else
-          REVIEW_ARN=$(aws codeguru-reviewer create-code-review \
-            --name "q-review-$CODEBUILD_BUILD_NUMBER" \
-            --repository-association-arn $ASSOCIATION_ARN \
-            --type "RepositoryAnalysis={RepositoryHead={BranchName=$BRANCH_NAME}}" \
-            --query 'CodeReview.CodeReviewArn' --output text)
+        zip -r source.zip PLOCLO_cms/ \
+          --exclude "PLOCLO_cms/node_modules/*" \
+          --exclude "PLOCLO_cms/.env"
 
-          echo "Q Review: $REVIEW_ARN"
-          ELAPSED=0
-          while [ $ELAPSED -lt 300 ]; do
-            STATUS=$(aws codeguru-reviewer describe-code-review \
-              --code-review-arn $REVIEW_ARN \
-              --query 'CodeReview.State' --output text)
-            echo "  status: $STATUS (${ELAPSED}s)"
-            [ "$STATUS" = "Completed" ] || [ "$STATUS" = "Failed" ] && break
-            sleep 15; ELAPSED=$((ELAPSED+15))
-          done
+        aws codeguru-security create-upload-url \
+          --scan-name $SCAN_NAME \
+          --output json > upload-info.json
 
-          aws codeguru-reviewer list-recommendations \
-            --code-review-arn $REVIEW_ARN \
-            --output json > q-review-report.json
+        S3_URL=$(python3 -c "import json; print(json.load(open('upload-info.json'))['s3Url'])")
+        CODE_ID=$(python3 -c "import json; print(json.load(open('upload-info.json'))['codeArtifactId'])")
 
-          HIGH=$(python3 -c "
+        curl -X PUT -T source.zip "$S3_URL"
+
+        aws codeguru-security create-scan \
+          --resource-id "{\"codeArtifact\":{\"codeArtifactId\":\"$CODE_ID\"}}" \
+          --scan-name $SCAN_NAME \
+          --scan-type Standard
+
+        ELAPSED=0
+        while [ $ELAPSED -lt 300 ]; do
+          STATUS=$(aws codeguru-security get-scan \
+            --scan-name $SCAN_NAME \
+            --query 'scanState' --output text)
+          echo "  Q Scan: $STATUS (${ELAPSED}s)"
+          [ "$STATUS" = "Successful" ] || [ "$STATUS" = "Failed" ] && break
+          sleep 15; ELAPSED=$((ELAPSED+15))
+        done
+
+        aws codeguru-security get-findings \
+          --scan-name $SCAN_NAME \
+          --output json > q-security-findings.json
+
+        BLOCK=$(python3 -c "
         import json
-        d=json.load(open('q-review-report.json'))
-        h=[r for r in d.get('RecommendationSummaries',[]) if r.get('Severity')=='High']
-        print(len(h))")
+        d = json.load(open('q-security-findings.json'))
+        block = [f for f in d.get('findings',[]) if f.get('severity') in ['Critical','High']]
+        print(len(block))")
 
-          echo "Q High severity: $HIGH"
-          if [ "$HIGH" -gt "0" ]; then
-            echo "BLOCKED: Q found $HIGH High severity issues"; exit 1
-          fi
+        if [ "$BLOCK" -gt "0" ]; then
+          echo "BLOCKED: Q found $BLOCK Critical/High issues"; exit 1
         fi
+        echo "Q Security Scan passed"
 
   post_build:
     commands:
-      - echo "Q-CodeReview stage passed on $(date)"
+      - echo "Scan stage completed on $(date)"
+      - |
+        if [ "$CODEBUILD_BUILD_SUCCEEDING" = "0" ]; then
+          echo "Build failed - sending to Amazon Q for analysis..."
+
+          BUILD_LOG=$(aws logs get-log-events \
+            --log-group-name /aws/codebuild/$(echo $CODEBUILD_BUILD_ID | cut -d: -f1) \
+            --log-stream-name $(echo $CODEBUILD_BUILD_ID | cut -d: -f2) \
+            --limit 100 \
+            --query 'events[*].message' \
+            --output text 2>/dev/null | tail -80 || \
+            echo "Could not fetch logs")
+
+          python3 << PYEOF
+
+          import boto3, json, os
+
+          bedrock = boto3.client('bedrock-runtime', region_name=os.environ['AWS_DEFAULT_REGION'])
+
+          build_log = os.popen("echo '$BUILD_LOG'").read()
+
+          prompt = f"""You are a DevSecOps expert on AWS.
+          Analyze this CodeBuild failure and respond in Thai language with these sections:
+          1. Root Cause
+          2. Fix Steps
+          3. Prevention
+
+          Build ID: {os.environ.get('CODEBUILD_BUILD_ID','')}
+
+          Log:
+          {build_log}
+          """
+
+         response = bedrock.invoke_model(
+           modelId='amazon.nova-pro-v1:0',
+           body=json.dumps({
+           "messages": [{"role": "user", "content": prompt}],
+           "inferenceConfig": {"maxTokens": 1000, "temperature": 0.3}
+            })
+          )
+
+         result = json.loads(response['body'].read())
+         analysis = result['output']['message']['content'][0]['text']
+
+         with open('q-analysis.txt', 'w') as f:
+         f.write(analysis)
+
+         print("=== Amazon Q Analysis ===")
+         print(analysis)
+
+        topic = os.environ.get('SNS_TOPIC_ARN', '')
+        if topic:
+           sns = boto3.client('sns')
+           sns.publish(
+           TopicArn=topic,
+           Subject="[FAILED] Pipeline Failed - Q Analysis",
+           Message="Build: " + os.environ.get('CODEBUILD_BUILD_ID','') + "\n\n=== Q Analysis ===\n" + analysis
+           )
+           print("Notification sent!")
+           PYEOF
+         fi
 
 artifacts:
   files:
     - audit-report.json
-    - q-review-report.json
+    - q-security-findings.json
+    - q-analysis.txt
   discard-paths: yes
   name: ScanArtifacts
