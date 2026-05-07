@@ -19,8 +19,7 @@ pre_build:
       - FRONTEND_IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:frontend-latest"
       - echo "Backend image  -> $BACKEND_IMAGE"
       - echo "Frontend image -> $FRONTEND_IMAGE"
-
-      - |
+            - |
         cat > PLOCLO_cms/.env << EOF
         DATABASE_URL=$DATABASE_URL
         DB_HOST=$DB_HOST
@@ -43,18 +42,19 @@ pre_build:
 build:
     commands:
       - echo "[1/2] Docker build..."
+      - docker-compose -f PLOCLO_cms/docker-compose.yml build 2>&1
       - docker build -t $BACKEND_IMAGE  PLOCLO_cms/backend/
       - docker build -t $FRONTEND_IMAGE PLOCLO_cms/frontend/
-
 post_build:
     commands:
       - echo "[2/2] Push to ECR..."
+      - docker-compose -f PLOCLO_cms/docker-compose.yml push
       - docker push $BACKEND_IMAGE
       - docker push $FRONTEND_IMAGE
 
       - |
         printf '[{"name":"backend","imageUri":"%s"},{"name":"frontend","imageUri":"%s"}]' \
-          "$BACKEND_IMAGE" "$FRONTEND_IMAGE" > imagedefinitions.json
+                  "$BACKEND_IMAGE" "$FRONTEND_IMAGE" > imagedefinitions.json
         echo "imagedefinitions.json:"
         cat imagedefinitions.json
 
@@ -71,8 +71,7 @@ post_build:
           --limit 100 \
           --query 'events[*].message' \
           --output text 2>/dev/null | tail -80 || echo "Could not fetch logs")
-
-        python3 q_analyze_build.py "$BUILD_STATUS" "$BUILD_LOG" "$BACKEND_IMAGE" "$FRONTEND_IMAGE"
+                 python3 q_analyze_build.py "$BUILD_STATUS" "$BUILD_LOG" "$BACKEND_IMAGE" "$FRONTEND_IMAGE"
         cat q-build-analysis.txt
 
 artifacts:
@@ -80,4 +79,3 @@ artifacts:
     - imagedefinitions.json
     - q-build-analysis.txt
   discard-paths: yes
-  name: BuildArtifacts
