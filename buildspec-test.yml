@@ -67,7 +67,7 @@ phases:
         fi
         echo "Q Security Scan passed"
 
-  post_build:
+    post_build:
     commands:
       - echo "Scan stage completed on $(date)"
       - |
@@ -80,7 +80,7 @@ phases:
             --output text 2>/dev/null | tail -80 || \
             echo "Could not fetch logs")
 
-          cat > /tmp/q_analyze.py << 'SCRIPT'
+          python3 - "$BUILD_LOG" << 'PYEOF'
 import boto3, json, os, sys
 
 bedrock = boto3.client('bedrock-runtime', region_name=os.environ['AWS_DEFAULT_REGION'])
@@ -113,9 +113,7 @@ with open('q-analysis.txt', 'w') as f:
 
 print("=== Amazon Q Analysis ===")
 print(analysis)
-SCRIPT
-
-          python3 /tmp/q_analyze.py "$BUILD_LOG"
+PYEOF
         fi
 
 artifacts:
