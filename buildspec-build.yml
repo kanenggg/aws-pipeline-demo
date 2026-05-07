@@ -8,12 +8,11 @@ phases:
       - export PATH=$HOME/.local/bin:/usr/local/bin:$PATH
       - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
-pre_build:
+  pre_build:
     commands:
       - echo "Checking Docker..."
       - docker info > /dev/null 2>&1 && echo "Docker ready" || (echo "Docker not available - enable Privileged mode"; exit 1)
 
-      - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - IMAGE_REPO_NAME=${IMAGE_REPO_NAME:-ploclo-cms}
       - BACKEND_IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:backend-latest"
       - FRONTEND_IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:frontend-latest"
@@ -37,16 +36,15 @@ pre_build:
         EOF
 
       - grep -q "^\.env$" PLOCLO_cms/.dockerignore 2>/dev/null || echo ".env" >> PLOCLO_cms/.dockerignore
-
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
 
-build:
+  build:
     commands:
       - echo "[1/2] Docker build..."
-      - docker build -t $BACKEND_IMAGE  PLOCLO_cms/backend/
+      - docker build -t $BACKEND_IMAGE PLOCLO_cms/backend/
       - docker build -t $FRONTEND_IMAGE PLOCLO_cms/frontend/
 
-post_build:
+  post_build:
     commands:
       - echo "[2/2] Push to ECR..."
       - docker push $BACKEND_IMAGE
