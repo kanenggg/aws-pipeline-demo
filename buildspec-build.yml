@@ -8,10 +8,17 @@ phases:
       - export PATH=$HOME/.local/bin:/usr/local/bin:$PATH
       - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 
-  pre_build:
+pre_build:
     commands:
       - echo "Checking Docker..."
       - docker info > /dev/null 2>&1 && echo "Docker ready" || (echo "Docker not available - enable Privileged mode"; exit 1)
+
+      - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - IMAGE_REPO_NAME=${IMAGE_REPO_NAME:-ploclo-cms}
+      - BACKEND_IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:backend-latest"
+      - FRONTEND_IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:frontend-latest"
+      - echo "Backend image  -> $BACKEND_IMAGE"
+      - echo "Frontend image -> $FRONTEND_IMAGE"
 
       - |
         cat > PLOCLO_cms/.env << EOF
@@ -33,21 +40,23 @@ phases:
 
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
 
-  build:
+build:
     commands:
       - echo "[1/2] Docker build..."
-      - docker-compose -f PLOCLO_cms/docker-compose.yml build 2>&1
+      - docker build -t $BACKEND_IMAGE  PLOCLO_cms/backend/
+      - docker build -t $FRONTEND_IMAGE PLOCLO_cms/frontend/
 
-  post_build:
+post_build:
     commands:
       - echo "[2/2] Push to ECR..."
-      - docker-compose -f PLOCLO_cms/docker-compose.yml push
+      - docker push $BACKEND_IMAGE
+      - docker push $FRONTEND_IMAGE
 
       - |
         printf '[{"name":"backend","imageUri":"%s"},{"name":"frontend","imageUri":"%s"}]' \
-          "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:backend-latest" \
-          "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:frontend-latest" \
-          > imagedefinitions.json
+          "$BACKEND_IMAGE" "$FRONTEND_IMAGE" > imagedefinitions.json
+        echo "imagedefinitions.json:"
+        cat imagedefinitions.json
 
       - echo "Analyzing build result with Amazon Q Dev..."
       - |
@@ -63,7 +72,7 @@ phases:
           --query 'events[*].message' \
           --output text 2>/dev/null | tail -80 || echo "Could not fetch logs")
 
-        python3 q_analyze_build.py "$BUILD_STATUS" "$BUILD_LOG"
+        python3 q_analyze_build.py "$BUILD_STATUS" "$BUILD_LOG" "$BACKEND_IMAGE" "$FRONTEND_IMAGE"
         cat q-build-analysis.txt
 
 artifacts:
