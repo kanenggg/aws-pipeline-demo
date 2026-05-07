@@ -1,68 +1,84 @@
-  post_build:
-    commands:
-      - echo "Scan stage completed on $(date)"
-      - |
-        if [ "$CODEBUILD_BUILD_SUCCEEDING" = "0" ]; then
-          echo "Build failed - sending to Amazon Q for analysis..."
+post_build:
+  commands:
+    - echo "Scan stage completed on $(date)"
+    - |
+      if [ "$CODEBUILD_BUILD_SUCCEEDING" = "0" ]; then
+        echo "Build failed - sending to Amazon Q for analysis..."
 
-          BUILD_LOG=$(aws logs get-log-events \
-            --log-group-name /aws/codebuild/$(echo $CODEBUILD_BUILD_ID | cut -d: -f1) \
-            --log-stream-name $(echo $CODEBUILD_BUILD_ID | cut -d: -f2) \
-            --limit 100 \
-            --query 'events[*].message' \
-            --output text 2>/dev/null | tail -80 || \
-            echo "Could not fetch logs")
+        BUILD_LOG=$(aws logs get-log-events \
+          --log-group-name /aws/codebuild/$(echo $CODEBUILD_BUILD_ID | cut -d: -f1) \
+          --log-stream-name $(echo $CODEBUILD_BUILD_ID | cut -d: -f2) \
+          --limit 100 \
+          --query 'events[*].message' \
+          --output text 2>/dev/null | tail -80 || \
+          echo "Could not fetch logs")
 
-          python3 << PYEOF
+        python3 << PYEOF
+import boto3, json, os
 
-          import boto3, json, os
+bedrock = boto3.client(
+    'bedrock-runtime',
+    region_name=os.environ['AWS_DEFAULT_REGION']
+)
 
-          bedrock = boto3.client('bedrock-runtime', region_name=os.environ['AWS_DEFAULT_REGION'])
+build_log = os.popen("echo '$BUILD_LOG'").read()
 
-          build_log = os.popen("echo '$BUILD_LOG'").read()
+prompt = f"""You are a DevSecOps expert on AWS.
+Analyze this CodeBuild failure and respond in Thai language with these sections:
+1. Root Cause
+2. Fix Steps
+3. Prevention
 
-          prompt = f"""You are a DevSecOps expert on AWS.
-          Analyze this CodeBuild failure and respond in Thai language with these sections:
-          1. Root Cause
-          2. Fix Steps
-          3. Prevention
+Build ID: {os.environ.get('CODEBUILD_BUILD_ID','')}
 
-          Build ID: {os.environ.get('CODEBUILD_BUILD_ID','')}
+Log:
+{build_log}
+"""
 
-          Log:
-          {build_log}
-          """
+response = bedrock.invoke_model(
+    modelId='amazon.nova-pro-v1:0',
+    body=json.dumps({
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "inferenceConfig": {
+            "maxTokens": 1000,
+            "temperature": 0.3
+        }
+    })
+)
 
-         response = bedrock.invoke_model(
-           modelId='amazon.nova-pro-v1:0',
-           body=json.dumps({
-           "messages": [{"role": "user", "content": prompt}],
-           "inferenceConfig": {"maxTokens": 1000, "temperature": 0.3}
-            })
-          )
+result = json.loads(response['body'].read())
+analysis = result['output']['message']['content'][0]['text']
 
-         result = json.loads(response['body'].read())
-         analysis = result['output']['message']['content'][0]['text']
+with open('q-analysis.txt', 'w') as f:
+    f.write(analysis)
 
-         with open('q-analysis.txt', 'w') as f:
-         f.write(analysis)
+print("=== Amazon Q Analysis ===")
+print(analysis)
 
-         print("=== Amazon Q Analysis ===")
-         print(analysis)
+topic = os.environ.get('SNS_TOPIC_ARN', '')
 
-        topic = os.environ.get('SNS_TOPIC_ARN', '')
-        if topic:
-           sns = boto3.client('sns')
-           sns.publish(
-           TopicArn=topic,
-           Subject="[FAILED] Pipeline Failed - Q Analysis",
-           Message="Build: " + os.environ.get('CODEBUILD_BUILD_ID','') + "\n\n=== Q Analysis ===\n" + analysis
-           )
-           print("Notification sent!")
-           PYEOF
-         fi
+if topic:
+    sns = boto3.client('sns')
 
-  artifacts:
+    sns.publish(
+        TopicArn=topic,
+        Subject="[FAILED] Pipeline Failed - Q Analysis",
+        Message="Build: "
+        + os.environ.get('CODEBUILD_BUILD_ID','')
+        + "\n\n=== Q Analysis ===\n"
+        + analysis
+    )
+
+    print("Notification sent!")
+PYEOF
+      fi
+
+artifacts:
   files:
     - audit-report.json
     - q-security-findings.json
