@@ -10,35 +10,26 @@ build_id       = os.environ.get('CODEBUILD_BUILD_ID', '')
 prompt = (
     "You are a DevSecOps expert on AWS Cloud Native.\n"
     "Analyze the Docker Build and ECR Push result and respond in Thai language:\n\n"
-    "## Build Status\n"
-    "- Build ID:       " + build_id + "\n"
-    "- Status:         " + build_status + "\n"
-    "- Backend Image:  " + backend_image + "\n"
-    "- Frontend Image: " + frontend_image + "\n\n"
-    "If Status = SUCCEEDED summarize:\n"
-    "1. What was built successfully\n"
-    "2. Images pushed to ECR\n"
-    "3. Container security best practice recommendations\n\n"
-    "If Status = FAILED analyze:\n"
-    "1. Root cause\n"
-    "2. Fix steps\n"
-    "3. Prevention\n\n"
-    "=== Build Log ===\n" + build_log
+    "Build ID: " + build_id + "\n"
+    "Status: " + build_status + "\n"
+    "Backend Image: " + backend_image + "\n"
+    "Frontend Image: " + frontend_image + "\n\n"
+    "If SUCCEEDED: summarize what was built and give container security recommendations.\n"
+    "If FAILED: explain root cause, fix steps, and prevention.\n\n"
+    "Build Log:\n" + build_log
 )
 
 response = bedrock.invoke_model(
-    modelId='amazon.nova-pro-v1:0',
+    modelId='anthropic.claude-3-haiku-20240307-v1:0',
     body=json.dumps({
-        "messages": [{
-            "role": "user",
-            "content": [{"type": "text", "text": prompt}]
-        }],
-        "inferenceConfig": {"maxTokens": 1500, "temperature": 0.3}
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 1500,
+        "messages": [{"role": "user", "content": prompt}]
     })
 )
 
 result   = json.loads(response['body'].read())
-analysis = result['output']['message']['content'][0]['text']
+analysis = result['content'][0]['text']
 
 with open('q-build-analysis.txt', 'w') as f:
     f.write("Build ID: " + build_id + "\n")
