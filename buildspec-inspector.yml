@@ -1,0 +1,89 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+    commands:
+      - pip install boto3 --quiet
+      - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+  pre_build:
+    commands:
+      - IMAGE_REPO_NAME=${IMAGE_REPO_NAME:-ploclo-cms}
+      - BACKEND_IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:backend-latest"
+      - FRONTEND_IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:frontend-latest"
+      - echo "Backend  -> $BACKEND_IMAGE"
+      - echo "Frontend -> $FRONTEND_IMAGE"
+
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+
+  build:
+    commands:
+      - echo "[1/3] Pull images from ECR..."
+      - docker pull $BACKEND_IMAGE
+      - docker pull $FRONTEND_IMAGE
+
+      - echo "[2/3] Trigger Inspector V2 scan..."
+      - |
+        BACKEND_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' $BACKEND_IMAGE 2>/dev/null || echo "$BACKEND_IMAGE")
+        FRONTEND_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' $FRONTEND_IMAGE 2>/dev/null || echo "$FRONTEND_IMAGE")
+
+        # Enable Inspector V2 if not already enabled
+        aws inspector2 enable --resource-types ECR 2>/dev/null || true
+
+        # Wait for Inspector to pick up the newly pushed images (ECR push triggers auto-scan)
+        echo "Waiting for Inspector scan to complete (max 5 min)..."
+        for i in $(seq 1 30); do
+          sleep 10
+          BACKEND_STATUS=$(aws inspector2 list-findings \
+            --filter-criteria "{\"ecrImageRepositoryName\":[{\"comparison\":\"EQUALS\",\"value\":\"$IMAGE_REPO_NAME\"}]}" \
+            --query 'findings[0].status' --output text 2>/dev/null || echo "PENDING")
+          echo "  [$i/30] Inspector status: $BACKEND_STATUS"
+          if [ "$BACKEND_STATUS" != "PENDING" ] && [ "$BACKEND_STATUS" != "None" ] && [ "$BACKEND_STATUS" != "" ]; then
+            break
+          fi
+        done
+
+      - echo "[3/3] Collect Inspector findings..."
+      - |
+        aws inspector2 list-findings \
+          --filter-criteria "{\"ecrImageRepositoryName\":[{\"comparison\":\"EQUALS\",\"value\":\"$IMAGE_REPO_NAME\"}]}" \
+          --query 'findings[*].{severity:severity,title:title,description:description,packageName:packageVulnerabilityDetails.vulnerablePackages[0].name,fixedVersion:packageVulnerabilityDetails.vulnerablePackages[0].fixedInVersion,cve:packageVulnerabilityDetails.vulnerabilityId,score:inspectorScore}' \
+          --output json > inspector-findings.json 2>/dev/null || echo "[]" > inspector-findings.json
+
+        TOTAL=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len(d))")
+        CRITICAL=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len([f for f in d if f.get('severity')=='CRITICAL']))")
+        HIGH=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len([f for f in d if f.get('severity')=='HIGH']))")
+        MEDIUM=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len([f for f in d if f.get('severity')=='MEDIUM']))")
+
+        echo "Inspector findings — Total: $TOTAL | Critical: $CRITICAL | High: $HIGH | Medium: $MEDIUM"
+
+        python3 q_analyze_inspector.py "$BACKEND_IMAGE" "$FRONTEND_IMAGE" "$CRITICAL" "$HIGH" "$MEDIUM"
+        cat q-inspector-analysis.txt
+
+        if [ "$CRITICAL" -gt "0" ]; then
+          echo "============================================"
+          echo "BLOCKED: $CRITICAL Critical CVEs found by Inspector"
+          echo "กรุณาอ่าน q-inspector-analysis.txt เพื่อดูวิธีแก้ไข"
+          echo "============================================"
+          exit 1
+        fi
+
+        echo "Inspector Security Gate passed"
+
+  post_build:
+    commands:
+      - echo "Inspector scan stage completed on $(date)"
+      - |
+        if [ "$CODEBUILD_BUILD_SUCCEEDING" = "0" ]; then
+          echo "Inspector scan FAILED — see q-inspector-analysis.txt"
+          cat q-inspector-analysis.txt 2>/dev/null || true
+        fi
+
+artifacts:
+  files:
+    - inspector-findings.json
+    - q-inspector-analysis.txt
+  discard-paths: yes
+  name: InspectorArtifacts
