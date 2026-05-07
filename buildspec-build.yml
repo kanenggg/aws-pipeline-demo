@@ -10,8 +10,17 @@ phases:
 
   pre_build:
     commands:
-      - export PATH=$HOME/.local/bin:/usr/local/bin:$PATH   # ← แก้ exit 127
+      - export PATH=$HOME/.local/bin:/usr/local/bin:$PATH
       - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+      # ─── Start Docker daemon ──────────────────────────────
+      - echo "Starting Docker daemon..."
+      - nohup /usr/local/bin/dockerd \
+          --host=unix:///var/run/docker.sock \
+          --host=tcp://127.0.0.1:2375 \
+          --storage-driver=overlay2 &
+      - timeout 30 sh -c "until docker info > /dev/null 2>&1; do echo 'Waiting for Docker...'; sleep 2; done"
+      - echo "Docker is ready"
 
       - |
         cat > PLOCLO_cms/.env << EOF
@@ -31,7 +40,6 @@ phases:
 
       - grep -q "^\.env$" PLOCLO_cms/.dockerignore 2>/dev/null || echo ".env" >> PLOCLO_cms/.dockerignore
 
-      # ─── Semgrep SAST ──────────────────────────────────────
       - echo "[1/3] Semgrep SAST..."
       - semgrep scan --config p/default --error --quiet . --json > semgrep-report.json || true
 
@@ -49,7 +57,6 @@ phases:
       - echo "[3/3] Push + Inspector..."
       - docker-compose -f PLOCLO_cms/docker-compose.yml push
 
-      # ─── Inspector CVE Poll ────────────────────────────────
       - |
         MAX_WAIT=300; ELAPSED=0; PREV=-1
         while [ $ELAPSED -lt $MAX_WAIT ]; do
@@ -71,7 +78,6 @@ phases:
           echo "BLOCKED: Critical CVE found"; exit 1
         fi
 
-      # ─── Amazon Q Security Summary ─────────────────────────
       - |
         python3 -c "
         import json, os, datetime
@@ -108,85 +114,3 @@ artifacts:
     - q-build-summary.json
   discard-paths: yes
   name: BuildArtifacts
-
-
-  version: 0.2
-
-env:
-  variables:
-    REPO_NAME: "PLOCLO_cms"
-    BRANCH_NAME: "main"
-
-phases:
-  install:
-    runtime-versions:
-      nodejs: 22
-    commands:
-      - npm ci --prefix PLOCLO_cms
-
-  build:
-    commands:
-      # ─── Unit + Integration Tests ──────────────────────────
-      - echo "[1/3] Running tests..."
-      - npm test --prefix PLOCLO_cms
-      - npm run test:integration --prefix PLOCLO_cms
-
-      # ─── npm audit ────────────────────────────────────────
-      - echo "[2/3] npm audit..."
-      - |
-        npm audit --prefix PLOCLO_cms --json > audit-report.json || true
-        CRITICAL=$(cat audit-report.json | python3 -c "
-        import sys,json; d=json.load(sys.stdin)
-        print(d.get('metadata',{}).get('vulnerabilities',{}).get('critical',0))")
-        echo "Critical: $CRITICAL"
-        if [ "$CRITICAL" -gt "0" ]; then
-          echo "BLOCKED: critical npm vulnerabilities"; exit 1
-        fi
-
-      # ─── CodeGuru Security (Q-powered) ───────────────────
-      - echo "[3/3] Amazon Q Security Scan..."
-      - |
-        SCAN_NAME="q-scan-$CODEBUILD_BUILD_NUMBER"
-
-        zip -r source.zip PLOCLO_cms/ \
-          --exclude "PLOCLO_cms/node_modules/*" \
-          --exclude "PLOCLO_cms/.env"
-
-        aws codeguru-security create-upload-url \
-          --scan-name $SCAN_NAME \
-          --output json > upload-info.json
-
-        S3_URL=$(python3 -c "import json; print(json.load(open('upload-info.json'))['s3Url'])")
-        CODE_ID=$(python3 -c "import json; print(json.load(open('upload-info.json'))['codeArtifactId'])")
-
-        curl -X PUT -T source.zip "$S3_URL"
-
-        aws codeguru-security create-scan \
-          --resource-id "{\"codeArtifact\":{\"codeArtifactId\":\"$CODE_ID\"}}" \
-          --scan-name $SCAN_NAME \
-          --scan-type Standard
-
-        ELAPSED=0
-        while [ $ELAPSED -lt 300 ]; do
-          STATUS=$(aws codeguru-security get-scan \
-            --scan-name $SCAN_NAME \
-            --query 'scanState' --output text)
-          echo "  Q Scan: $STATUS (${ELAPSED}s)"
-          [ "$STATUS" = "Successful" ] || [ "$STATUS" = "Failed" ] && break
-          sleep 15; ELAPSED=$((ELAPSED+15))
-        done
-
-        aws codeguru-security get-findings \
-          --scan-name $SCAN_NAME \
-          --output json > q-security-findings.json
-
-        BLOCK=$(python3 -c "
-        import json
-        d = json.load(open('q-security-findings.json'))
-        block = [f for f in d.get('findings',[]) if f.get('severity') in ['Critical','High']]
-        print(len(block))")
-
-        if [ "$BLOCK" -gt "0" ]; then
-          echo "BLOCKED: Q found $BLOCK Critical/High issues"; exit 1
-        fi
-        echo "Q Security Scan passed"

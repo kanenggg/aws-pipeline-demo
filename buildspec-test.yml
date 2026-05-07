@@ -1,53 +1,107 @@
-post_build:
-  commands:
-    - echo "Scan stage completed on $(date)"
-    - |
-      if [ "$CODEBUILD_BUILD_SUCCEEDING" = "0" ]; then
-        echo "Build failed - sending to Amazon Q for analysis..."
+version: 0.2
 
-        BUILD_LOG=$(aws logs get-log-events \
-          --log-group-name /aws/codebuild/$(echo $CODEBUILD_BUILD_ID | cut -d: -f1) \
-          --log-stream-name $(echo $CODEBUILD_BUILD_ID | cut -d: -f2) \
-          --limit 100 \
-          --query 'events[*].message' \
-          --output text 2>/dev/null | tail -80 || \
-          echo "Could not fetch logs")
+env:
+  variables:
+    REPO_NAME: "PLOCLO_cms"
+    BRANCH_NAME: "main"
 
-        python3 << PYEOF
-import boto3, json, os
+phases:
+  install:
+    runtime-versions:
+      nodejs: 22
+    commands:
+      - npm ci --prefix PLOCLO_cms
 
-bedrock = boto3.client(
-    'bedrock-runtime',
-    region_name=os.environ['AWS_DEFAULT_REGION']
+  build:
+    commands:
+      - echo "[1/3] Running tests..."
+      - npm test --prefix PLOCLO_cms
+      - npm run test:integration --prefix PLOCLO_cms
+
+      - echo "[2/3] npm audit..."
+      - |
+        npm audit --prefix PLOCLO_cms --json > audit-report.json || true
+        CRITICAL=$(cat audit-report.json | python3 -c "
+        import sys,json; d=json.load(sys.stdin)
+        print(d.get('metadata',{}).get('vulnerabilities',{}).get('critical',0))")
+        echo "Critical: $CRITICAL"
+        if [ "$CRITICAL" -gt "0" ]; then
+          echo "BLOCKED: critical npm vulnerabilities"; exit 1
+        fi
+
+      - echo "[3/3] Amazon Q Security Scan..."
+      - |
+        SCAN_NAME="q-scan-$CODEBUILD_BUILD_NUMBER"
+        zip -r source.zip PLOCLO_cms/ \
+          --exclude "PLOCLO_cms/node_modules/*" \
+          --exclude "PLOCLO_cms/.env"
+        aws codeguru-security create-upload-url \
+          --scan-name $SCAN_NAME \
+          --output json > upload-info.json
+        S3_URL=$(python3 -c "import json; print(json.load(open('upload-info.json'))['s3Url'])")
+        CODE_ID=$(python3 -c "import json; print(json.load(open('upload-info.json'))['codeArtifactId'])")
+        curl -X PUT -T source.zip "$S3_URL"
+        aws codeguru-security create-scan \
+          --resource-id "{\"codeArtifact\":{\"codeArtifactId\":\"$CODE_ID\"}}" \
+          --scan-name $SCAN_NAME \
+          --scan-type Standard
+        ELAPSED=0
+        while [ $ELAPSED -lt 300 ]; do
+          STATUS=$(aws codeguru-security get-scan \
+            --scan-name $SCAN_NAME \
+            --query 'scanState' --output text)
+          echo "  Q Scan: $STATUS (${ELAPSED}s)"
+          [ "$STATUS" = "Successful" ] || [ "$STATUS" = "Failed" ] && break
+          sleep 15; ELAPSED=$((ELAPSED+15))
+        done
+        aws codeguru-security get-findings \
+          --scan-name $SCAN_NAME \
+          --output json > q-security-findings.json
+        BLOCK=$(python3 -c "
+        import json
+        d = json.load(open('q-security-findings.json'))
+        block = [f for f in d.get('findings',[]) if f.get('severity') in ['Critical','High']]
+        print(len(block))")
+        if [ "$BLOCK" -gt "0" ]; then
+          echo "BLOCKED: Q found $BLOCK Critical/High issues"; exit 1
+        fi
+        echo "Q Security Scan passed"
+
+  post_build:
+    commands:
+      - echo "Scan stage completed on $(date)"
+      - |
+        if [ "$CODEBUILD_BUILD_SUCCEEDING" = "0" ]; then
+          BUILD_LOG=$(aws logs get-log-events \
+            --log-group-name /aws/codebuild/$(echo $CODEBUILD_BUILD_ID | cut -d: -f1) \
+            --log-stream-name $(echo $CODEBUILD_BUILD_ID | cut -d: -f2) \
+            --limit 100 \
+            --query 'events[*].message' \
+            --output text 2>/dev/null | tail -80 || \
+            echo "Could not fetch logs")
+
+          cat > /tmp/q_analyze.py << 'SCRIPT'
+import boto3, json, os, sys
+
+bedrock = boto3.client('bedrock-runtime', region_name=os.environ['AWS_DEFAULT_REGION'])
+build_log = sys.argv[1] if len(sys.argv) > 1 else "No log available"
+build_id = os.environ.get('CODEBUILD_BUILD_ID', '')
+
+prompt = (
+    "You are a DevSecOps expert on AWS.\n"
+    "Analyze this CodeBuild failure and respond in Thai language with:\n"
+    "1. Root Cause\n"
+    "2. Fix Steps\n"
+    "3. Prevention\n\n"
+    "Build ID: " + build_id + "\n\n"
+    "Log:\n" + build_log
 )
-
-build_log = os.popen("echo '$BUILD_LOG'").read()
-
-prompt = f"""You are a DevSecOps expert on AWS.
-Analyze this CodeBuild failure and respond in Thai language with these sections:
-1. Root Cause
-2. Fix Steps
-3. Prevention
-
-Build ID: {os.environ.get('CODEBUILD_BUILD_ID','')}
-
-Log:
-{build_log}
-"""
 
 response = bedrock.invoke_model(
     modelId='amazon.nova-pro-v1:0',
     body=json.dumps({
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        "inferenceConfig": {
-            "maxTokens": 1000,
-            "temperature": 0.3
-        }
+        "messages": [{"role": "user", "content": prompt}],
+        "inferenceConfig": {"maxTokens": 1000, "temperature": 0.3}
     })
 )
 
@@ -59,24 +113,10 @@ with open('q-analysis.txt', 'w') as f:
 
 print("=== Amazon Q Analysis ===")
 print(analysis)
+SCRIPT
 
-topic = os.environ.get('SNS_TOPIC_ARN', '')
-
-if topic:
-    sns = boto3.client('sns')
-
-    sns.publish(
-        TopicArn=topic,
-        Subject="[FAILED] Pipeline Failed - Q Analysis",
-        Message="Build: "
-        + os.environ.get('CODEBUILD_BUILD_ID','')
-        + "\n\n=== Q Analysis ===\n"
-        + analysis
-    )
-
-    print("Notification sent!")
-PYEOF
-      fi
+          python3 /tmp/q_analyze.py "$BUILD_LOG"
+        fi
 
 artifacts:
   files:
@@ -84,4 +124,4 @@ artifacts:
     - q-security-findings.json
     - q-analysis.txt
   discard-paths: yes
-  name: ScanArtifacts
+  name: SourceCodeArtifacts
