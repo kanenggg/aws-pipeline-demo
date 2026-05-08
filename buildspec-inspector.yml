@@ -36,11 +36,11 @@ phases:
         echo "Waiting for Inspector scan to complete (max 5 min)..."
         for i in $(seq 1 30); do
           sleep 10
-          BACKEND_STATUS=$(aws inspector2 list-findings \
+          FINDING_COUNT=$(aws inspector2 list-findings \
             --filter-criteria "{\"ecrImageRepositoryName\":[{\"comparison\":\"EQUALS\",\"value\":\"$IMAGE_REPO_NAME\"}]}" \
-            --query 'findings[0].status' --output text 2>/dev/null || echo "PENDING")
-          echo "  [$i/30] Inspector status: $BACKEND_STATUS"
-          if [ "$BACKEND_STATUS" != "PENDING" ] && [ "$BACKEND_STATUS" != "None" ] && [ "$BACKEND_STATUS" != "" ]; then
+            --query 'length(findings)' --output text 2>/dev/null || echo "0")
+          echo "  [$i/30] Findings so far: $FINDING_COUNT"
+          if [ "$FINDING_COUNT" != "0" ] && [ "$FINDING_COUNT" != "None" ] && [ "$FINDING_COUNT" != "" ]; then
             break
           fi
         done
