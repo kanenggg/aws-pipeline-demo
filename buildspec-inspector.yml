@@ -15,7 +15,6 @@ phases:
       - FRONTEND_IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:frontend-latest"
       - echo "Backend  -> $BACKEND_IMAGE"
       - echo "Frontend -> $FRONTEND_IMAGE"
-
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
 
   build:
@@ -24,49 +23,71 @@ phases:
       - docker pull $BACKEND_IMAGE
       - docker pull $FRONTEND_IMAGE
 
-      - echo "[2/3] Trigger Inspector V2 scan..."
+      - echo "[2/3] Waiting for Inspector scan..."
       - |
-        BACKEND_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' $BACKEND_IMAGE 2>/dev/null || echo "$BACKEND_IMAGE")
-        FRONTEND_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' $FRONTEND_IMAGE 2>/dev/null || echo "$FRONTEND_IMAGE")
-
-        # Enable Inspector V2 if not already enabled
         aws inspector2 enable --resource-types ECR 2>/dev/null || true
 
-        # Wait for Inspector to pick up the newly pushed images (ECR push triggers auto-scan)
-        echo "Waiting for Inspector scan to complete (max 5 min)..."
-        for i in $(seq 1 30); do
-          sleep 10
-          FINDING_COUNT=$(aws inspector2 list-findings \
-            --filter-criteria "{\"ecrImageRepositoryName\":[{\"comparison\":\"EQUALS\",\"value\":\"$IMAGE_REPO_NAME\"}]}" \
-            --query 'length(findings)' --output text 2>/dev/null || echo "0")
-          echo "  [$i/30] Findings so far: $FINDING_COUNT"
-          if [ "$FINDING_COUNT" != "0" ] && [ "$FINDING_COUNT" != "None" ] && [ "$FINDING_COUNT" != "" ]; then
-            break
-          fi
-        done
+        # รอ 2 นาทีให้ Inspector scan เสร็จ
+        echo "Waiting 120 seconds for Inspector to complete scan..."
+        sleep 120
+        echo "Done waiting"
 
       - echo "[3/3] Collect Inspector findings..."
       - |
+        # ดึง findings ที่ fix ได้ + deduplicate by CVE
         aws inspector2 list-findings \
-          --filter-criteria "{\"ecrImageRepositoryName\":[{\"comparison\":\"EQUALS\",\"value\":\"$IMAGE_REPO_NAME\"}]}" \
-          --query 'findings[*].{severity:severity,title:title,description:description,packageName:packageVulnerabilityDetails.vulnerablePackages[0].name,fixedVersion:packageVulnerabilityDetails.vulnerablePackages[0].fixedInVersion,cve:packageVulnerabilityDetails.vulnerabilityId,score:inspectorScore}' \
-          --output json > inspector-findings.json 2>/dev/null || echo "[]" > inspector-findings.json
+          --filter-criteria "{
+            \"ecrImageRepositoryName\":[{\"comparison\":\"EQUALS\",\"value\":\"$IMAGE_REPO_NAME\"}],
+            \"findingStatus\":[{\"comparison\":\"EQUALS\",\"value\":\"ACTIVE\"}],
+            \"fixAvailable\":[{\"comparison\":\"EQUALS\",\"value\":\"YES\"}]
+          }" \
+          --output json > inspector-raw.json 2>/dev/null || echo "{\"findings\":[]}" > inspector-raw.json
+
+        # Deduplicate by CVE ID และ filter เฉพาะ CRITICAL/HIGH
+        python3 << 'PYEOF'
+import json
+
+with open('inspector-raw.json') as f:
+    data = json.load(f)
+
+findings = data.get('findings', [])
+
+# Deduplicate by CVE ID
+seen = set()
+unique = []
+for f in findings:
+    cve = f.get('packageVulnerabilityDetails', {}).get('vulnerabilityId', '')
+    sev = f.get('severity', '')
+    key = f"{cve}-{sev}"
+    if key not in seen:
+        seen.add(key)
+        unique.append({
+            'severity': sev,
+            'cve': cve,
+            'title': f.get('title', ''),
+            'packageName': f.get('packageVulnerabilityDetails', {}).get('vulnerablePackages', [{}])[0].get('name', ''),
+            'fixedVersion': f.get('packageVulnerabilityDetails', {}).get('vulnerablePackages', [{}])[0].get('fixedInVersion', ''),
+            'score': f.get('inspectorScore', 0)
+        })
+
+with open('inspector-findings.json', 'w') as f:
+    json.dump(unique, f, indent=2)
+
+print(f"Raw findings: {len(findings)} → Unique: {len(unique)}")
+PYEOF
 
         TOTAL=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len(d))")
         CRITICAL=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len([f for f in d if f.get('severity')=='CRITICAL']))")
         HIGH=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len([f for f in d if f.get('severity')=='HIGH']))")
         MEDIUM=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len([f for f in d if f.get('severity')=='MEDIUM']))")
 
-        echo "Inspector findings — Total: $TOTAL | Critical: $CRITICAL | High: $HIGH | Medium: $MEDIUM"
+        echo "Unique findings — Total: $TOTAL | Critical: $CRITICAL | High: $HIGH | Medium: $MEDIUM"
 
         python3 q_analyze_inspector.py "$BACKEND_IMAGE" "$FRONTEND_IMAGE" "$CRITICAL" "$HIGH" "$MEDIUM"
         cat q-inspector-analysis.txt
 
         if [ "$CRITICAL" -gt "0" ]; then
-          echo "============================================"
-          echo "BLOCKED: $CRITICAL Critical CVEs found by Inspector"
-          echo "กรุณาอ่าน q-inspector-analysis.txt เพื่อดูวิธีแก้ไข"
-          echo "============================================"
+          echo "BLOCKED: $CRITICAL Critical CVEs found"
           exit 1
         fi
 
@@ -74,10 +95,10 @@ phases:
 
   post_build:
     commands:
-      - echo "Inspector scan stage completed on $(date)"
+      - echo "Inspector scan completed on $(date)"
       - |
         if [ "$CODEBUILD_BUILD_SUCCEEDING" = "0" ]; then
-          echo "Inspector scan FAILED — see q-inspector-analysis.txt"
+          echo "Inspector FAILED"
           cat q-inspector-analysis.txt 2>/dev/null || true
         fi
 
