@@ -19,46 +19,116 @@ phases:
 
   build:
     commands:
-      - echo "[1/3] Pull images from ECR..."
+      - echo "[1/4] Pull images from ECR..."
       - docker pull $BACKEND_IMAGE
       - docker pull $FRONTEND_IMAGE
 
-      - echo "[2/3] Waiting for Inspector scan..."
+      - echo "[2/4] Enable Amazon Inspector V2 for ECR..."
       - |
-        aws inspector2 enable --resource-types ECR 2>/dev/null || true
+        # Enable Inspector และตรวจสอบสถานะจริงๆ (ไม่ suppress error)
+        ENABLE_OUTPUT=$(aws inspector2 enable --resource-types ECR 2>&1)
+        ENABLE_STATUS=$?
 
-        # รอ 2 นาทีให้ Inspector scan เสร็จ
-        echo "Waiting 120 seconds for Inspector to complete scan..."
-        sleep 120
-        echo "Done waiting"
+        if [ $ENABLE_STATUS -ne 0 ]; then
+          # Already enabled ถือว่าโอเค แต่ถ้า error อื่นให้หยุด
+          if echo "$ENABLE_OUTPUT" | grep -qi "already enabled\|ResourceAlreadyExistsException\|ConflictException"; then
+            echo "Inspector already enabled — continuing"
+          else
+            echo "ERROR: Failed to enable Inspector V2:"
+            echo "$ENABLE_OUTPUT"
+            exit 1
+          fi
+        else
+          echo "Inspector V2 enabled successfully"
+        fi
 
-      - echo "[3/3] Collect Inspector findings..."
+        # ตรวจสอบสถานะ ECR scan จริงๆ
+        ACCOUNT_STATUS=$(aws inspector2 batch-get-account-status \
+          --account-ids "$AWS_ACCOUNT_ID" \
+          --query 'accounts[0].resourceState.ecr.status' \
+          --output text 2>&1)
+
+        echo "Inspector ECR status: $ACCOUNT_STATUS"
+
+        if [ "$ACCOUNT_STATUS" != "ENABLED" ]; then
+          echo "ERROR: Inspector ECR scanning is not ENABLED (status: $ACCOUNT_STATUS)"
+          exit 1
+        fi
+
+      - echo "[3/4] Polling Inspector until scan completes..."
       - |
-        # ดึง findings ที่ fix ได้ + deduplicate by CVE
+        MAX_WAIT=1800   # รอสูงสุด 30 นาที
+        POLL_INTERVAL=30
+        ELAPSED=0
+        FOUND=0
+
+        echo "Polling every ${POLL_INTERVAL}s (max ${MAX_WAIT}s)..."
+
+        while [ $ELAPSED -lt $MAX_WAIT ]; do
+          RAW=$(aws inspector2 list-findings \
+            --filter-criteria "{
+              \"ecrImageRepositoryName\":[{\"comparison\":\"EQUALS\",\"value\":\"$IMAGE_REPO_NAME\"}],
+              \"findingStatus\":[{\"comparison\":\"EQUALS\",\"value\":\"ACTIVE\"}]
+            }" \
+            --output json 2>/dev/null || echo "{\"findings\":[]}")
+
+          COUNT=$(echo "$RAW" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('findings',[])))")
+
+          echo "  [${ELAPSED}s] Findings so far: $COUNT"
+
+          # ถ้าเจอ findings แล้ว ให้รอเพิ่มอีก 1 รอบเพื่อให้ scan เสร็จสมบูรณ์
+          if [ "$COUNT" -gt "0" ]; then
+            FOUND=1
+            echo "  Findings detected — waiting one more interval for scan to stabilize..."
+            sleep $POLL_INTERVAL
+            break
+          fi
+
+          sleep $POLL_INTERVAL
+          ELAPSED=$((ELAPSED + POLL_INTERVAL))
+        done
+
+        if [ $ELAPSED -ge $MAX_WAIT ] && [ $FOUND -eq 0 ]; then
+          echo "WARNING: Timed out after ${MAX_WAIT}s — proceeding with 0 findings (Inspector may not have scanned yet)"
+        fi
+
+      - echo "[4/4] Collect Inspector findings..."
+      - |
+        # ดึง findings ทุกตัว (รวม CVE ที่ยังไม่มี fix) — ไม่มี fixAvailable filter
         aws inspector2 list-findings \
           --filter-criteria "{
             \"ecrImageRepositoryName\":[{\"comparison\":\"EQUALS\",\"value\":\"$IMAGE_REPO_NAME\"}],
-            \"findingStatus\":[{\"comparison\":\"EQUALS\",\"value\":\"ACTIVE\"}],
-            \"fixAvailable\":[{\"comparison\":\"EQUALS\",\"value\":\"YES\"}]
+            \"findingStatus\":[{\"comparison\":\"EQUALS\",\"value\":\"ACTIVE\"}]
           }" \
           --output json > inspector-raw.json 2>/dev/null || echo "{\"findings\":[]}" > inspector-raw.json
 
-        # q_analyze_inspector.py จะ deduplicate และสร้าง inspector-findings.json ก่อน แล้วค่อยนับ
+        RAW_COUNT=$(python3 -c "import json; d=json.load(open('inspector-raw.json')); print(len(d.get('findings',[])))")
+        echo "Raw findings pulled: $RAW_COUNT"
+
+        # deduplicate และสร้าง inspector-findings.json
         python3 q_analyze_inspector.py "$BACKEND_IMAGE" "$FRONTEND_IMAGE" 0 0 0
 
         CRITICAL=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len([f for f in d if f.get('severity')=='CRITICAL']))")
         HIGH=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len([f for f in d if f.get('severity')=='HIGH']))")
         MEDIUM=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len([f for f in d if f.get('severity')=='MEDIUM']))")
+        LOW=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len([f for f in d if f.get('severity')=='LOW']))")
         TOTAL=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len(d))")
 
-        echo "Unique findings — Total: $TOTAL | Critical: $CRITICAL | High: $HIGH | Medium: $MEDIUM"
+        echo "================================================"
+        echo "Unique findings — Total: $TOTAL"
+        echo "  Critical : $CRITICAL"
+        echo "  High     : $HIGH"
+        echo "  Medium   : $MEDIUM"
+        echo "  Low      : $LOW"
+        echo "================================================"
 
         # รัน analyze อีกครั้งพร้อม count ที่ถูกต้อง
         python3 q_analyze_inspector.py "$BACKEND_IMAGE" "$FRONTEND_IMAGE" "$CRITICAL" "$HIGH" "$MEDIUM"
         cat q-inspector-analysis.txt
 
+        # Security Gate: block ถ้ามี Critical
         if [ "$CRITICAL" -gt "0" ]; then
-          echo "BLOCKED: $CRITICAL Critical CVEs found"
+          echo "BLOCKED: $CRITICAL Critical CVE(s) found — fix before deploying"
           exit 1
         fi
 
@@ -69,13 +139,14 @@ phases:
       - echo "Inspector scan completed on $(date)"
       - |
         if [ "$CODEBUILD_BUILD_SUCCEEDING" = "0" ]; then
-          echo "Inspector FAILED"
-          cat q-inspector-analysis.txt 2>/dev/null || true
+          echo "=== Inspector FAILED — Analysis Report ==="
+          cat q-inspector-analysis.txt 2>/dev/null || echo "(no report generated)"
         fi
 
 artifacts:
   files:
     - inspector-findings.json
+    - inspector-raw.json
     - q-inspector-analysis.txt
   discard-paths: yes
   name: InspectorArtifacts
