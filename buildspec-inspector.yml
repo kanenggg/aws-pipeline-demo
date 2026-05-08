@@ -43,13 +43,17 @@ phases:
           }" \
           --output json > inspector-raw.json 2>/dev/null || echo "{\"findings\":[]}" > inspector-raw.json
 
-        TOTAL=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len(d))" 2>/dev/null || echo 0)
+        # q_analyze_inspector.py จะ deduplicate และสร้าง inspector-findings.json ก่อน แล้วค่อยนับ
+        python3 q_analyze_inspector.py "$BACKEND_IMAGE" "$FRONTEND_IMAGE" 0 0 0
+
         CRITICAL=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len([f for f in d if f.get('severity')=='CRITICAL']))")
         HIGH=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len([f for f in d if f.get('severity')=='HIGH']))")
         MEDIUM=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len([f for f in d if f.get('severity')=='MEDIUM']))")
+        TOTAL=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len(d))")
 
         echo "Unique findings — Total: $TOTAL | Critical: $CRITICAL | High: $HIGH | Medium: $MEDIUM"
 
+        # รัน analyze อีกครั้งพร้อม count ที่ถูกต้อง
         python3 q_analyze_inspector.py "$BACKEND_IMAGE" "$FRONTEND_IMAGE" "$CRITICAL" "$HIGH" "$MEDIUM"
         cat q-inspector-analysis.txt
 

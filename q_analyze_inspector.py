@@ -44,26 +44,39 @@ except Exception as e:
     print(f"Warning: {e}")
     findings_summary = "Could not load inspector-raw.json"
 
-prompt = f"""You are a DevSecOps expert on AWS Cloud Native.
-Analyze the Amazon Inspector V2 container image scan results and respond in Thai language:
+prompt = f"""คุณคือผู้เชี่ยวชาญด้านความปลอดภัย Container บน AWS
+กรุณาวิเคราะห์ผลการสแกน Amazon Inspector V2 และอธิบายเป็นภาษาไทยที่เข้าใจง่าย
+เหมาะสำหรับนักพัฒนาที่ไม่ได้เชี่ยวชาญด้าน Security โดยเฉพาะ
 
-## Scan Summary
+## ข้อมูล Build
 - Build ID:       {build_id}
 - Backend Image:  {backend_image}
 - Frontend Image: {frontend_image}
-- Critical CVEs:  {critical_count}
-- High CVEs:      {high_count}
-- Medium CVEs:    {medium_count}
+- Critical CVEs:  {critical_count} รายการ
+- High CVEs:      {high_count} รายการ
+- Medium CVEs:    {medium_count} รายการ
 
-## Top Findings (JSON)
+## ผลการสแกน (JSON)
 {findings_summary}
 
-Please analyze and provide:
-1. สรุปภาพรวมความเสี่ยงของ container images
-2. CVE ที่อันตรายที่สุด 3-5 รายการ พร้อมอธิบายผลกระทบ
-3. วิธีแก้ไข (base image upgrade, package update)
-4. คำแนะนำ container hardening เพิ่มเติม
-5. สรุปว่าควร deploy ต่อหรือไม่"""
+กรุณาวิเคราะห์และตอบในรูปแบบนี้:
+
+🔍 สรุปภาพรวม
+- บอกว่า image มีความเสี่ยงระดับไหน (ปลอดภัย / ควรระวัง / อันตราย)
+- มี CVE กี่รายการ แบ่งตาม severity
+
+🚨 ช่องโหว่ที่ต้องแก้ด่วน (Critical/High)
+- อธิบายแต่ละ CVE ว่าคืออะไร กระทบอะไร ในภาษาที่เข้าใจง่าย
+- บอก package ที่มีปัญหา และ version ที่ควรอัปเดตเป็น
+
+🔧 วิธีแก้ไข
+- คำสั่งหรือขั้นตอนที่ทำได้เลย เช่น อัปเดต base image หรือ package ใด
+
+🛡️ คำแนะนำเพิ่มเติม
+- สิ่งที่ควรทำเพื่อให้ container ปลอดภัยขึ้น
+
+✅ สรุป: ควร Deploy ต่อหรือไม่?
+- ตอบชัดเจนว่า Deploy ได้ / ไม่ควร Deploy พร้อมเหตุผลสั้นๆ"""
 
 try:
     response = bedrock.invoke_model(
