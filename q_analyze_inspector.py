@@ -9,9 +9,9 @@ medium_count   = sys.argv[5] if len(sys.argv) > 5 else "0"
 build_id       = os.environ.get('CODEBUILD_BUILD_ID', '')
 
 try:
-    findings_raw = open('inspector-findings.json').read()
-    findings     = json.loads(findings_raw)
-    top_findings = findings[:20]
+    with open('inspector-findings.json') as f:
+        findings = json.loads(f.read())
+    top_findings     = findings[:20]
     findings_summary = json.dumps(top_findings, indent=2, ensure_ascii=False)[:6000]
 except Exception:
     findings_summary = "Could not load inspector-findings.json"
@@ -41,8 +41,10 @@ try:
         modelId='amazon.nova-pro-v1:0',
         body=json.dumps({
             "messages": [{"role": "user", "content": [{"text": prompt}]}],
-            "inferenceConfig": {"maxTokens": 2000, "temperature": 0.3}
-        })
+            "inferenceConfig": {"maxTokens": 2000, "temperature": 0.3, "stopSequences": []}
+        }),
+        accept='application/json',
+        contentType='application/json'
     )
     result   = json.loads(response['body'].read())
     analysis = result['output']['message']['content'][0]['text']
