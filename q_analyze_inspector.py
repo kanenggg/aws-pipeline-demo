@@ -41,10 +41,8 @@ try:
         modelId='amazon.nova-pro-v1:0',
         body=json.dumps({
             "messages": [{"role": "user", "content": [{"text": prompt}]}],
-            "inferenceConfig": {"maxTokens": 2000, "temperature": 0.3, "stopSequences": []}
-        }),
-        accept='application/json',
-        contentType='application/json'
+            "inferenceConfig": {"maxTokens": 2000, "temperature": 0.3}
+        })
     )
     result   = json.loads(response['body'].read())
     analysis = result['output']['message']['content'][0]['text']
