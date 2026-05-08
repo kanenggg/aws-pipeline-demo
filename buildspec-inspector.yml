@@ -40,39 +40,36 @@ phases:
 
       - echo "[3/4] Polling Inspector until scan completes..."
       - |
-        MAX_WAIT=1800   # รอสูงสุด 30 นาที
+        MAX_WAIT=1800
         POLL_INTERVAL=30
         ELAPSED=0
         FOUND=0
 
         echo "Polling every ${POLL_INTERVAL}s (max ${MAX_WAIT}s)..."
 
-        while [ $ELAPSED -lt $MAX_WAIT ]; do
-          RAW=$(aws inspector2 list-findings \
-            --filter-criteria "{
-              \"ecrImageRepositoryName\":[{\"comparison\":\"EQUALS\",\"value\":\"$IMAGE_REPO_NAME\"}],
-              \"findingStatus\":[{\"comparison\":\"EQUALS\",\"value\":\"ACTIVE\"}]
-            }" \
-            --output json 2>/dev/null || echo "{\"findings\":[]}")
+        while [ "$ELAPSED" -lt "$MAX_WAIT" ]; do
+          # บันทึกลงไฟล์แทนการเก็บใน variable เพื่อหลีกเลี่ยง Argument list too long
+          aws inspector2 list-findings \
+            --filter-criteria "{\"ecrImageRepositoryName\":[{\"comparison\":\"EQUALS\",\"value\":\"$IMAGE_REPO_NAME\"}],\"findingStatus\":[{\"comparison\":\"EQUALS\",\"value\":\"ACTIVE\"}]}" \
+            --output json > /tmp/poll-findings.json 2>/dev/null || echo '{"findings":[]}' > /tmp/poll-findings.json
 
-          COUNT=$(echo "$RAW" | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('findings',[])))")
+          COUNT=$(python3 -c "import json; print(len(json.load(open('/tmp/poll-findings.json')).get('findings',[])))")
 
           echo "  [${ELAPSED}s] Findings so far: $COUNT"
 
-          # ถ้าเจอ findings แล้ว ให้รอเพิ่มอีก 1 รอบเพื่อให้ scan เสร็จสมบูรณ์
           if [ "$COUNT" -gt "0" ]; then
             FOUND=1
-            echo "  Findings detected — waiting one more interval for scan to stabilize..."
-            sleep $POLL_INTERVAL
+            echo "  Findings detected — waiting one more interval to stabilize..."
+            sleep "$POLL_INTERVAL"
             break
           fi
 
-          sleep $POLL_INTERVAL
+          sleep "$POLL_INTERVAL"
           ELAPSED=$((ELAPSED + POLL_INTERVAL))
         done
 
-        if [ $ELAPSED -ge $MAX_WAIT ] && [ $FOUND -eq 0 ]; then
-          echo "WARNING: Timed out after ${MAX_WAIT}s — proceeding with 0 findings (Inspector may not have scanned yet)"
+        if [ "$ELAPSED" -ge "$MAX_WAIT" ] && [ "$FOUND" -eq "0" ]; then
+          echo "WARNING: Timed out — proceeding with 0 findings"
         fi
 
       - echo "[4/4] Collect Inspector findings..."
