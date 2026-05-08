@@ -23,26 +23,8 @@ phases:
       - docker pull $BACKEND_IMAGE
       - docker pull $FRONTEND_IMAGE
 
-      - echo "[2/4] Enable Amazon Inspector V2 for ECR..."
+      - echo "[2/4] Verify Amazon Inspector V2 is enabled..."
       - |
-        # Enable Inspector และตรวจสอบสถานะจริงๆ (ไม่ suppress error)
-        ENABLE_OUTPUT=$(aws inspector2 enable --resource-types ECR 2>&1)
-        ENABLE_STATUS=$?
-
-        if [ $ENABLE_STATUS -ne 0 ]; then
-          # Already enabled ถือว่าโอเค แต่ถ้า error อื่นให้หยุด
-          if echo "$ENABLE_OUTPUT" | grep -qi "already enabled\|ResourceAlreadyExistsException\|ConflictException"; then
-            echo "Inspector already enabled — continuing"
-          else
-            echo "ERROR: Failed to enable Inspector V2:"
-            echo "$ENABLE_OUTPUT"
-            exit 1
-          fi
-        else
-          echo "Inspector V2 enabled successfully"
-        fi
-
-        # ตรวจสอบสถานะ ECR scan จริงๆ
         ACCOUNT_STATUS=$(aws inspector2 batch-get-account-status \
           --account-ids "$AWS_ACCOUNT_ID" \
           --query 'accounts[0].resourceState.ecr.status' \
@@ -51,7 +33,8 @@ phases:
         echo "Inspector ECR status: $ACCOUNT_STATUS"
 
         if [ "$ACCOUNT_STATUS" != "ENABLED" ]; then
-          echo "ERROR: Inspector ECR scanning is not ENABLED (status: $ACCOUNT_STATUS)"
+          echo "ERROR: Inspector ECR scanning is not ENABLED"
+          echo "Please run: aws inspector2 enable --resource-types ECR"
           exit 1
         fi
 
