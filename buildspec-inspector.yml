@@ -43,40 +43,7 @@ phases:
           }" \
           --output json > inspector-raw.json 2>/dev/null || echo "{\"findings\":[]}" > inspector-raw.json
 
-        # Deduplicate by CVE ID และ filter เฉพาะ CRITICAL/HIGH
-        python3 << 'PYEOF'
-import json
-
-with open('inspector-raw.json') as f:
-    data = json.load(f)
-
-findings = data.get('findings', [])
-
-# Deduplicate by CVE ID
-seen = set()
-unique = []
-for f in findings:
-    cve = f.get('packageVulnerabilityDetails', {}).get('vulnerabilityId', '')
-    sev = f.get('severity', '')
-    key = f"{cve}-{sev}"
-    if key not in seen:
-        seen.add(key)
-        unique.append({
-            'severity': sev,
-            'cve': cve,
-            'title': f.get('title', ''),
-            'packageName': f.get('packageVulnerabilityDetails', {}).get('vulnerablePackages', [{}])[0].get('name', ''),
-            'fixedVersion': f.get('packageVulnerabilityDetails', {}).get('vulnerablePackages', [{}])[0].get('fixedInVersion', ''),
-            'score': f.get('inspectorScore', 0)
-        })
-
-with open('inspector-findings.json', 'w') as f:
-    json.dump(unique, f, indent=2)
-
-print(f"Raw findings: {len(findings)} → Unique: {len(unique)}")
-PYEOF
-
-        TOTAL=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len(d))")
+        TOTAL=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len(d))" 2>/dev/null || echo 0)
         CRITICAL=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len([f for f in d if f.get('severity')=='CRITICAL']))")
         HIGH=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len([f for f in d if f.get('severity')=='HIGH']))")
         MEDIUM=$(python3 -c "import json; d=json.load(open('inspector-findings.json')); print(len([f for f in d if f.get('severity')=='MEDIUM']))")
