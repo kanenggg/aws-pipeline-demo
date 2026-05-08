@@ -145,8 +145,6 @@ phases:
 
 artifacts:
   files:
-    - inspector-findings.json
-    - inspector-raw.json
-    - q-inspector-analysis.txt
+    - "**/*"
   discard-paths: yes
   name: InspectorArtifacts
