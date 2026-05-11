@@ -1,0 +1,41 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+    commands:
+      - pip install boto3 --quiet
+      - AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+  pre_build:
+    commands:
+      - IMAGE_REPO_NAME=${IMAGE_REPO_NAME:-ploclo-cms}
+      - BACKEND_IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:backend-latest"
+      - FRONTEND_IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:frontend-latest"
+      - echo "Backend  -> $BACKEND_IMAGE"
+      - echo "Frontend -> $FRONTEND_IMAGE"
+
+  build:
+    commands:
+      - echo "[1/1] Deploy to App Runner..."
+      - |
+        python3 q_analyze_deploy.py \
+          "$BACKEND_IMAGE" \
+          "$FRONTEND_IMAGE"
+
+  post_build:
+    commands:
+      - echo "Deploy completed on $(date)"
+      - |
+        if [ "$CODEBUILD_BUILD_SUCCEEDING" = "0" ]; then
+          echo "=== Deploy FAILED ==="
+          cat q-deploy-analysis.txt 2>/dev/null || true
+        fi
+      - cat q-deploy-analysis.txt
+
+artifacts:
+  files:
+    - q-deploy-analysis.txt
+  discard-paths: yes
+  name: DeployArtifacts
