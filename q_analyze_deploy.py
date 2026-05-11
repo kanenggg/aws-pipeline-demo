@@ -17,12 +17,15 @@ bedrock   = boto3.client('bedrock-runtime', region_name=region)
 
 # ── Deploy to App Runner ──────────────────────────────────────────────────────
 
+class ServiceNotFoundError(Exception):
+    pass
+
 def get_service_arn(service_name):
     res = apprunner.list_services()
     for svc in res.get('ServiceSummaryList', []):
         if svc['ServiceName'] == service_name:
             return svc['ServiceArn']
-    raise Exception(f"App Runner service '{service_name}' not found")
+    raise ServiceNotFoundError(f"App Runner service '{service_name}' not found")
 
 def deploy(service_name, image_uri):
     arn = get_service_arn(service_name)
@@ -91,7 +94,9 @@ try:
         body=json.dumps({
             "messages": [{"role": "user", "content": [{"text": prompt}]}],
             "inferenceConfig": {"maxTokens": 1500, "temperature": 0.3}
-        })
+        }),
+        accept='application/json',
+        contentType='application/json'
     )
     result   = json.loads(response['body'].read())
     analysis = result['output']['message']['content'][0]['text']
