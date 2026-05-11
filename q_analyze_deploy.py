@@ -10,8 +10,8 @@ backend_image  = sys.argv[1] if len(sys.argv) > 1 else ""
 frontend_image = sys.argv[2] if len(sys.argv) > 2 else ""
 build_id       = os.environ.get('CODEBUILD_BUILD_ID', '')
 ecs_cluster    = os.environ.get('ECS_CLUSTER',            'ploclo-cms-cluster')
-svc_backend    = os.environ.get('ECS_SERVICE_BACKEND',    'ploclo-cms-backend')
-svc_frontend   = os.environ.get('ECS_SERVICE_FRONTEND',   'ploclo-cms-frontend')
+svc_backend    = os.environ.get('ECS_SERVICE_BACKEND',    'ploclo-backend')
+svc_frontend   = os.environ.get('ECS_SERVICE_FRONTEND',   'ploclo-frontend')
 
 ecs     = boto3.client('ecs',             region_name=region)
 bedrock = boto3.client('bedrock-runtime', region_name=region)
@@ -67,8 +67,8 @@ def get_running_count(cluster, service):
 # ── Deploy ────────────────────────────────────────────────────────────────────
 
 print("[1/3] Updating task definitions...")
-backend_task  = update_task_def(ecs_cluster, svc_backend,  'backend',  backend_image)
-frontend_task = update_task_def(ecs_cluster, svc_frontend, 'frontend', frontend_image)
+backend_task  = update_task_def(ecs_cluster, svc_backend,  'ploclo-cms-backend',  backend_image)
+frontend_task = update_task_def(ecs_cluster, svc_frontend, 'ploclo-cms-frontend', frontend_image)
 
 print("[2/3] Deploying services...")
 deploy_service(ecs_cluster, svc_backend,  backend_task)
