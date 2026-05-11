@@ -55,7 +55,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NODE_ENV=development
+      - NODE_ENV=production
     command: npm run dev
     env_file:
       - ./.env
