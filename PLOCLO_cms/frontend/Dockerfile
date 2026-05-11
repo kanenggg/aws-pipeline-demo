@@ -7,9 +7,12 @@ RUN npm install
 
 COPY . .
 
-EXPOSE 3000
+RUN npm run build
 
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN chown -R appuser:appgroup /app
 USER appuser
 
-CMD ["npm", "run", "dev"]
+EXPOSE 3000
+
+CMD ["npm", "run", "start"]
