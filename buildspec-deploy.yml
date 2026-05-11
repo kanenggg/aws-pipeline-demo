@@ -32,7 +32,7 @@ phases:
           echo "=== Deploy FAILED ==="
           cat q-deploy-analysis.txt 2>/dev/null || true
         fi
-      - cat q-deploy-analysis.txt
+      - cat q-deploy-analysis.txt 2>/dev/null || true
 
 artifacts:
   files:
