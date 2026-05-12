@@ -22,8 +22,18 @@ phases:
 
   build:
     commands:
-      - echo "[1/1] Deploy to ECS Fargate..."
-      - python3 q_analyze_deploy.py "$BACKEND_IMAGE" "$FRONTEND_IMAGE"
+      - echo "[1/2] Updating backend service..."
+      - |
+        aws ecs update-service \
+          --cluster "$ECS_CLUSTER" \
+          --service "$ECS_SERVICE_BACKEND" \
+          --force-new-deployment
+      - echo "[2/2] Updating frontend service..."
+      - |
+        aws ecs update-service \
+          --cluster "$ECS_CLUSTER" \
+          --service "$ECS_SERVICE_FRONTEND" \
+          --force-new-deployment
 
   post_build:
     commands:
@@ -31,11 +41,6 @@ phases:
       - |
         if [ "$CODEBUILD_BUILD_SUCCEEDING" = "0" ]; then
           echo "=== Deploy FAILED ==="
+        else
+          echo "=== Deploy SUCCESS ==="
         fi
-      - cat q-deploy-analysis.txt 2>/dev/null || true
-
-artifacts:
-  files:
-    - q-deploy-analysis.txt
-  discard-paths: yes
-  name: DeployArtifacts
