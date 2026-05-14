@@ -12,8 +12,8 @@ phases:
     commands:
       - IMAGE_REPO_NAME=${IMAGE_REPO_NAME:-ploclo-cms}
       - ECS_CLUSTER=${ECS_CLUSTER:-ploclo-cms-cluster}
-      - ECS_SERVICE_BACKEND=${ECS_SERVICE_BACKEND:-ploclo-cms-backend}
-      - ECS_SERVICE_FRONTEND=${ECS_SERVICE_FRONTEND:-ploclo-cms-frontend}
+      - ECS_SERVICE_BACKEND=${ECS_SERVICE_BACKEND:-plocl-backend}
+      - ECS_SERVICE_FRONTEND=${ECS_SERVICE_FRONTEND:-ploclo-frontend}
       - BACKEND_IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:backend-latest"
       - FRONTEND_IMAGE="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:frontend-latest"
       - echo "Cluster  -> $ECS_CLUSTER"
