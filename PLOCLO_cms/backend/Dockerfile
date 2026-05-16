@@ -24,4 +24,4 @@ EXPOSE 3001
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 USER appuser
 
-CMD ["sh", "-c", "./wait-for-db.sh && node dist/index.js"]
+CMD ["sh", "-c", "./wait-for-db.sh && npx prisma db push && node dist/index.js"]
