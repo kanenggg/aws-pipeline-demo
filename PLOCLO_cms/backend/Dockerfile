@@ -16,8 +16,9 @@ RUN npx prisma generate
 
 COPY . .
 
-RUN chmod +x wait-for-db.sh
-RUN npm run build
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN chown -R appuser:appgroup /app   # ← เพิ่มตรงนี้
+USER appuser
 
 EXPOSE 3001
 
