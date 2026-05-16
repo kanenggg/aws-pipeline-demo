@@ -64,11 +64,11 @@ app.use("/api/instructorOnCourse", instructorOnCOurseRoutes);
 app.use("/api/reports", scoreCalculate);
 app.use("/api/programOnCourse", programOnCourseRoutes);
 
-app.get('/health', (req, res) => {
-    res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
-});
-
 app.listen(3001, async () => {
   await seedAdminUser();
   console.log("API on " + process.env.NEXT_PUBLIC_API_URL);
 });
+
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok' })
+})
