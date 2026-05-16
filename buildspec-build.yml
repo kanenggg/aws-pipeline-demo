@@ -38,11 +38,15 @@ phases:
       - grep -q "^\.env$" PLOCLO_cms/.dockerignore 2>/dev/null || echo ".env" >> PLOCLO_cms/.dockerignore
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
 
-  build:
-    commands:
-      - echo "[1/2] Docker build..."
-      - docker build -t $BACKEND_IMAGE PLOCLO_cms/backend/
-      - docker build -t $FRONTEND_IMAGE PLOCLO_cms/frontend/
+build:
+  commands:
+    - echo "[1/2] Docker build..."
+    - docker build -t $BACKEND_IMAGE PLOCLO_cms/backend/
+    - |
+      docker build \
+        --build-arg NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL \
+        -t $FRONTEND_IMAGE \
+        PLOCLO_cms/frontend/
 
   post_build:
     commands:
